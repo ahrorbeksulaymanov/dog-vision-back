@@ -5,3 +5,4 @@ tensorflow==2.21.0
 tensorflow-hub==0.16.1
 numpy==2.4.6
 pillow==11.3.0
+requests==2.32.4

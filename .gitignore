@@ -50,3 +50,12 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Dataset (downloaded, not committed)
+data/Images/
+data/*.tar
+tests/images/
+tests/results/
+
+# Training artifacts
+training_log*.csv

@@ -313,6 +313,54 @@ def unfreeze_backbone(base_model, unfreeze_from_layer: int):
     print(f"  Backbone: {trainable}/{total} layers trainable")
 
 
+# ── Temperature Scaling ──────────────────────────────────────────────────
+
+def fit_temperature_scaling(model, val_ds):
+    """
+    Fit a temperature T to calibrate softmax confidences.
+    Minimizes NLL on the validation set using grid search over T.
+
+    Works by converting model softmax probs back to log-probs (pseudo-logits),
+    then dividing by T and re-softmaxing.  Because softmax is shift-invariant,
+    log(probs) differs from true logits by a constant — which cancels out.
+
+    Returns the optimal temperature (float > 0).
+    """
+    all_probs = []
+    all_labels = []
+    for images, labels in val_ds:
+        probs = model.predict(images, verbose=0)
+        all_probs.append(probs)
+        labels_np = labels.numpy() if hasattr(labels, "numpy") else np.array(labels)
+        all_labels.append(labels_np)
+
+    all_probs = np.concatenate(all_probs, axis=0)
+    all_labels = np.concatenate(all_labels, axis=0)
+
+    log_probs = np.log(all_probs + 1e-8)
+
+    def compute_nll(T):
+        scaled = log_probs / T
+        scaled = scaled - np.max(scaled, axis=1, keepdims=True)
+        cal_probs = np.exp(scaled)
+        cal_probs = cal_probs / np.sum(cal_probs, axis=1, keepdims=True)
+        return -np.mean(np.sum(all_labels * np.log(cal_probs + 1e-8), axis=1))
+
+    best_T = 1.0
+    best_nll = compute_nll(1.0)
+    nll_before = best_nll
+    for T in np.arange(0.5, 5.01, 0.01):
+        nll = compute_nll(T)
+        if nll < best_nll:
+            best_nll = nll
+            best_T = float(round(T, 2))
+
+    print(f"  NLL before (T=1.0): {nll_before:.4f}")
+    print(f"  NLL after  (T={best_T:.2f}): {best_nll:.4f}")
+
+    return best_T
+
+
 # ── Training ───────────────────────────────────────────────────────────
 
 def train(args):
@@ -467,6 +515,19 @@ def train(args):
     print(f"  Validation Top-3 Acc:  {val_top3:.2%}")
     print(f"  Validation Top-5 Acc:  {val_top5:.2%}")
     print(f"  Validation Loss:       {val_loss:.4f}")
+
+    # ── Temperature scaling (confidence calibration) ─────────────
+    print(f"\n{'='*60}")
+    print("TEMPERATURE SCALING (Confidence Calibration)")
+    print(f"{'='*60}")
+
+    temperature = fit_temperature_scaling(model, val_ds_final)
+
+    temp_path = os.path.join(os.path.dirname(args.output) or ".", "temp_scale.json")
+    with open(temp_path, "w") as f:
+        json.dump({"temperature": temperature}, f)
+    print(f"  Optimal temperature: {temperature:.4f}")
+    print(f"  Saved to {temp_path}")
 
     return model, val_acc, val_top3, val_top5
 

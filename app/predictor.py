@@ -57,6 +57,28 @@ class DogBreedPredictor:
         self.top_k = top_k
         self.num_models = len(self.models)
 
+        # Load temperature scaling (confidence calibration)
+        self.temperature = 1.0
+        models_dir = os.path.dirname(model_paths[0]) if model_paths else "models"
+        temp_path = os.path.join(models_dir, "temp_scale.json")
+        if os.path.exists(temp_path):
+            with open(temp_path, "r") as f:
+                self.temperature = json.load(f).get("temperature", 1.0)
+            print(f"  Temperature scaling: T={self.temperature:.4f}")
+        else:
+            print(f"  Temperature scaling: disabled (T=1.0, no temp_scale.json)")
+
+    def _apply_temperature(self, probs):
+        """Apply temperature scaling to softmax probabilities."""
+        if self.temperature == 1.0:
+            return probs
+        logits = np.log(probs + 1e-8)
+        logits = logits / self.temperature
+        logits = logits - np.max(logits, axis=-1, keepdims=True)
+        calibrated = np.exp(logits)
+        calibrated = calibrated / np.sum(calibrated, axis=-1, keepdims=True)
+        return calibrated
+
     def predict(self, image_bytes: bytes, use_tta: bool = False):
         """
         Predict the dog breed from image bytes.
@@ -78,6 +100,7 @@ class DogBreedPredictor:
             else:
                 image = preprocess_image(image_bytes)
                 preds = model.predict(image, verbose=0)[0]
+            preds = self._apply_temperature(preds)
             all_predictions.append(preds)
 
         # Ensemble: average predictions across models
