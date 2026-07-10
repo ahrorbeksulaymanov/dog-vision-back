@@ -290,8 +290,21 @@ def build_model(num_classes: int, backbone_name: str = "mobilenetv2",
     )
     base_model.trainable = False  # Start frozen
 
+    # Each Keras Application expects its own preprocessing. Without this, the
+    # backbone produces degraded features and the head can't learn.
+    preproc_map = {
+        "mobilenetv2": tf.keras.applications.mobilenet_v2.preprocess_input,
+        "efficientnetv2": tf.keras.applications.efficientnet_v2.preprocess_input,
+        "efficientnetv2s": tf.keras.applications.efficientnet_v2.preprocess_input,
+        "convnext": tf.keras.applications.convnext.preprocess_input,
+    }
+    preprocess_input = preproc_map.get(
+        backbone_name, tf.keras.applications.mobilenet_v2.preprocess_input
+    )
+
     inputs = tf.keras.Input(shape=(img_size, img_size, 3))
-    x = base_model(inputs, training=False)
+    x = preprocess_input(inputs)
+    x = base_model(x, training=False)
     x = tf.keras.layers.GlobalAveragePooling2D()(x)
     x = tf.keras.layers.Dropout(0.4)(x)
     x = tf.keras.layers.Dense(512, activation="relu")(x)
@@ -377,7 +390,7 @@ def train(args):
     print(f"{'='*60}")
 
     train_ds, val_ds, class_names, num_classes = build_data_pipeline(
-        args.data_dir, args.batch_size, img_size, use_mixup=use_mixup
+        args.data_dir, args.batch_size, img_size, use_mixup=False
     )
 
     # Save class names
@@ -393,9 +406,9 @@ def train(args):
     )
     model.summary()
 
-    # ── Step A: Train classifier head (backbone frozen) ────────────
+    # ── Step A: Train classifier head (backbone frozen, NO MixUp) ──
     print(f"\n{'='*60}")
-    print("STEP A: Training classifier head (backbone frozen)")
+    print("STEP A: Training classifier head (backbone frozen, NO MixUp)")
     print(f"{'='*60}")
 
     model.compile(
@@ -420,10 +433,15 @@ def train(args):
         epochs=head_epochs, callbacks=callbacks, verbose=1,
     )
 
-    # ── Step B: Fine-tune (unfreeze backbone) ──────────────────────
+    # ── Step B: Fine-tune (unfreeze backbone) — re-enable MixUp ─────
     print(f"\n{'='*60}")
-    print("STEP B: Fine-tuning (unfreezing backbone layers)")
+    print("STEP B: Fine-tuning (unfreezing backbone layers, MixUp on)")
     print(f"{'='*60}")
+
+    # Rebuild data pipeline with MixUp for the fine-tune phase.
+    train_ds_mix, val_ds_mix, _, _ = build_data_pipeline(
+        args.data_dir, args.batch_size, img_size, use_mixup=use_mixup
+    )
 
     unfreeze_backbone(base_model, backbone_cfg["unfreeze_at"])
 
@@ -438,7 +456,7 @@ def train(args):
 
     remaining_epochs = args.epochs - head_epochs
     model.fit(
-        train_ds, validation_data=val_ds,
+        train_ds_mix, validation_data=val_ds_mix,
         epochs=remaining_epochs,
         callbacks=callbacks + [
             tf.keras.callbacks.ModelCheckpoint(
@@ -447,6 +465,11 @@ def train(args):
         ],
         verbose=1,
     )
+
+    # ── Save the 224 model NOW, before progressive 384 (so good
+    # 224 weights are preserved even if 384 transfer goes wrong).
+    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+    print(f"  224 model saved to {args.output} (preserved before 384 phase)")
 
     # ── Phase 2: Progressive resizing to 384x384 (optional) ────────
     if args.progressive:
@@ -499,29 +522,26 @@ def train(args):
             verbose=1,
         )
 
-    # ── Save & Evaluate ────────────────────────────────────────────
+    # ── Final evaluation: always re-evaluate the 224 model from disk ─
+    # so we report the saved weights (not whatever's in memory).
     print(f"\n{'='*60}")
     print("FINAL RESULTS")
     print(f"{'='*60}")
 
-    os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-    model.save(args.output)
-    print(f"  Model saved to {args.output}")
-
-    # Evaluate
-    val_ds_final = val_ds_384 if args.progressive else val_ds
-    val_loss, val_acc, val_top3, val_top5 = model.evaluate(val_ds_final, verbose=0)
-    print(f"  Validation Accuracy:   {val_acc:.2%}")
-    print(f"  Validation Top-3 Acc:  {val_top3:.2%}")
-    print(f"  Validation Top-5 Acc:  {val_top5:.2%}")
-    print(f"  Validation Loss:       {val_loss:.4f}")
+    from tensorflow.keras.models import load_model
+    model = load_model(args.output)
+    val_loss, val_acc, val_top3, val_top5 = model.evaluate(val_ds_mix, verbose=0)
+    print(f"  [224 saved] Validation Accuracy:   {val_acc:.2%}")
+    print(f"  [224 saved] Validation Top-3 Acc:  {val_top3:.2%}")
+    print(f"  [224 saved] Validation Top-5 Acc:  {val_top5:.2%}")
+    print(f"  [224 saved] Validation Loss:       {val_loss:.4f}")
 
     # ── Temperature scaling (confidence calibration) ─────────────
     print(f"\n{'='*60}")
     print("TEMPERATURE SCALING (Confidence Calibration)")
     print(f"{'='*60}")
 
-    temperature = fit_temperature_scaling(model, val_ds_final)
+    temperature = fit_temperature_scaling(model, val_ds_mix)
 
     temp_path = os.path.join(os.path.dirname(args.output) or ".", "temp_scale.json")
     with open(temp_path, "w") as f:

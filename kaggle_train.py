@@ -173,7 +173,7 @@ def cutmix_batch(images, labels, alpha=0.2):
     return mixed_images, mixed_labels
 
 
-def build_data_pipeline(data_dir, batch_size, img_size, is_training=True):
+def build_data_pipeline(data_dir, batch_size, img_size, is_training=True, use_mixup=True):
     train_ds, val_ds = tf.keras.utils.image_dataset_from_directory(
         data_dir,
         validation_split=0.2,
@@ -189,6 +189,7 @@ def build_data_pipeline(data_dir, batch_size, img_size, is_training=True):
     print(f"  Image size: {img_size}x{img_size}")
     print(f"  Classes: {num_classes} breeds")
     print(f"  Train batches: {len(train_ds)}, Val batches: {len(val_ds)}")
+    print(f"  MixUp/CutMix: {use_mixup and is_training}")
 
     normalization = tf.keras.layers.Rescaling(1.0 / 255.0)
     train_ds = train_ds.map(lambda x, y: (normalization(x), y), num_parallel_calls=tf.data.AUTOTUNE)
@@ -208,12 +209,15 @@ def build_data_pipeline(data_dir, batch_size, img_size, is_training=True):
             num_parallel_calls=tf.data.AUTOTUNE,
         )
 
-        def apply_mixup(images, labels):
-            if tf.random.uniform([]) < 0.5:
-                return mixup_batch(images, labels)
-            else:
-                return cutmix_batch(images, labels)
-        train_ds = train_ds.map(apply_mixup, num_parallel_calls=tf.data.AUTOTUNE)
+        # MixUp/CutMix only when use_mixup=True (skip in Step A so the head
+        # can learn from clean labels first).
+        if use_mixup:
+            def apply_mixup(images, labels):
+                if tf.random.uniform([]) < 0.5:
+                    return mixup_batch(images, labels)
+                else:
+                    return cutmix_batch(images, labels)
+            train_ds = train_ds.map(apply_mixup, num_parallel_calls=tf.data.AUTOTUNE)
 
     train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
     val_ds = val_ds.prefetch(tf.data.AUTOTUNE)
@@ -229,8 +233,19 @@ def build_model(num_classes, backbone_name, img_size=224):
     )
     base_model.trainable = False
 
+    # Each Keras Application expects its own preprocessing:
+    #   - EfficientNetV2 → [-1, 1]
+    #   - ConvNeXt       → [0, 1] (no scaling; channels_first in some cases)
+    # Without this, the backbone features are degraded → head can't learn.
+    preproc_map = {
+        "efficientnetv2s": tf.keras.applications.efficientnet_v2.preprocess_input,
+        "convnext": tf.keras.applications.convnext.preprocess_input,
+    }
+    preprocess_input = preproc_map.get(backbone_name, tf.keras.applications.mobilenet_v2.preprocess_input)
+
     inputs = tf.keras.Input(shape=(img_size, img_size, 3))
-    x = base_model(inputs, training=False)
+    x = preprocess_input(inputs)
+    x = base_model(x, training=False)
     x = tf.keras.layers.GlobalAveragePooling2D()(x)
     x = tf.keras.layers.Dropout(0.4)(x)
     x = tf.keras.layers.Dense(512, activation="relu")(x)
@@ -286,7 +301,7 @@ def fit_temperature_scaling(model, val_ds):
 
 # ── 4. Train a Single Backbone ───────────────────────────────────────────
 
-def train_backbone(backbone_name, output_path, epochs=30, progressive=True):
+def train_backbone(backbone_name, output_path, epochs=20, progressive=True):
     cfg = BACKBONES[backbone_name]
     print(f"\n{'='*60}")
     print(f"TRAINING: {backbone_name}")
@@ -295,9 +310,9 @@ def train_backbone(backbone_name, output_path, epochs=30, progressive=True):
     print(f"  Progressive: {progressive}")
     print(f"{'='*60}")
 
-    # Phase 1: 224x224
+    # Phase 1: 224x224, NO MixUp (so the head can learn from clean labels).
     train_ds, val_ds, class_names, num_classes = build_data_pipeline(
-        DATA_DIR, BATCH_SIZE, 224, is_training=True
+        DATA_DIR, BATCH_SIZE, 224, is_training=True, use_mixup=False,
     )
 
     # Save class names (only once)
@@ -310,8 +325,8 @@ def train_backbone(backbone_name, output_path, epochs=30, progressive=True):
     model, base_model = build_model(num_classes, backbone_name, img_size=224)
     model.summary()
 
-    # Step A: Train head
-    print(f"\n--- STEP A: Training classifier head (frozen backbone) ---")
+    # Step A: Train head (NO MixUp, clean labels).
+    print(f"\n--- STEP A: Training classifier head (frozen backbone, NO MixUp) ---")
     model.compile(
         optimizer=tf.keras.optimizers.AdamW(learning_rate=1e-3, weight_decay=1e-4),
         loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.1),
@@ -327,8 +342,12 @@ def train_backbone(backbone_name, output_path, epochs=30, progressive=True):
     head_epochs = max(5, epochs // 4)
     model.fit(train_ds, validation_data=val_ds, epochs=head_epochs, callbacks=callbacks, verbose=1)
 
-    # Step B: Fine-tune
-    print(f"\n--- STEP B: Fine-tuning (partial unfreeze) ---")
+    # Step B: Fine-tune. Re-enable MixUp for regularization once the head
+    # has learned basic features. Rebuild the data pipeline to include MixUp.
+    print(f"\n--- STEP B: Fine-tuning (partial unfreeze, MixUp re-enabled) ---")
+    train_ds_mix, val_ds_mix, _, _ = build_data_pipeline(
+        DATA_DIR, BATCH_SIZE, 224, is_training=True, use_mixup=True,
+    )
     unfreeze_backbone(base_model, cfg["unfreeze_at"])
     model.compile(
         optimizer=tf.keras.optimizers.AdamW(learning_rate=cfg["lr"], weight_decay=1e-4),
@@ -339,7 +358,7 @@ def train_backbone(backbone_name, output_path, epochs=30, progressive=True):
     )
     remaining_epochs = epochs - head_epochs
     model.fit(
-        train_ds, validation_data=val_ds,
+        train_ds_mix, validation_data=val_ds_mix,
         epochs=remaining_epochs,
         callbacks=callbacks + [
             tf.keras.callbacks.ModelCheckpoint(output_path, monitor="val_accuracy", save_best_only=True, verbose=1),
@@ -347,10 +366,31 @@ def train_backbone(backbone_name, output_path, epochs=30, progressive=True):
         verbose=1,
     )
 
+    # ── Save 224 model NOW, before progressive 384, so the good
+    # 224 weights are preserved even if 384 transfer goes wrong.
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    final_224_path = output_path
+    print(f"  224 model saved to {final_224_path} (preserved before 384 phase)")
+
+    # Evaluate the 224 model
+    val_loss, val_acc, val_top3, val_top5 = model.evaluate(val_ds_mix, verbose=0)
+    print(f"\n  [224] Validation Accuracy:  {val_acc:.2%}")
+    print(f"  [224] Validation Top-3 Acc: {val_top3:.2%}")
+    print(f"  [224] Validation Top-5 Acc: {val_top5:.2%}")
+
+    # Temperature scaling on 224 model
+    print(f"\n--- TEMPERATURE SCALING (224) ---")
+    temperature = fit_temperature_scaling(model, val_ds_mix)
+    temp_path = output_path.replace(".h5", "_temp_scale.json")
+    with open(temp_path, "w") as f:
+        json.dump({"temperature": temperature}, f)
+    print(f"  Temperature: {temperature:.4f}")
+    print(f"  Saved to {temp_path}")
+
     # Phase 2: Progressive resizing to 384
     if progressive:
         print(f"\n--- PHASE 2: Progressive resizing to 384x384 ---")
-        train_ds_384, val_ds_384, _, _ = build_data_pipeline(DATA_DIR, BATCH_SIZE // 2, 384, is_training=True)
+        train_ds_384, val_ds_384, _, _ = build_data_pipeline(DATA_DIR, BATCH_SIZE // 2, 384, is_training=True, use_mixup=True)
 
         model_384, base_model_384 = build_model(num_classes, backbone_name, img_size=384)
 
@@ -380,27 +420,20 @@ def train_backbone(backbone_name, output_path, epochs=30, progressive=True):
             verbose=1,
         )
 
-    # Save model
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    model.save(output_path)
-    print(f"  Model saved to {output_path}")
+        val_loss, val_acc, val_top3, val_top5 = model.evaluate(val_ds_384, verbose=0)
+        print(f"\n  [384] Validation Accuracy:  {val_acc:.2%}")
+        print(f"  [384] Validation Top-3 Acc: {val_top3:.2%}")
+        print(f"  [384] Validation Top-5 Acc: {val_top5:.2%}")
 
-    # Evaluate
-    val_ds_final = val_ds_384 if progressive else val_ds
-    val_loss, val_acc, val_top3, val_top5 = model.evaluate(val_ds_final, verbose=0)
-    print(f"\n  Validation Accuracy:  {val_acc:.2%}")
-    print(f"  Validation Top-3 Acc: {val_top3:.2%}")
-    print(f"  Validation Top-5 Acc: {val_top5:.2%}")
-    print(f"  Validation Loss:      {val_loss:.4f}")
-
-    # Temperature scaling
-    print(f"\n--- TEMPERATURE SCALING ---")
-    temperature = fit_temperature_scaling(model, val_ds_final)
-    temp_path = output_path.replace(".h5", "_temp_scale.json")
-    with open(temp_path, "w") as f:
-        json.dump({"temperature": temperature}, f)
-    print(f"  Temperature: {temperature:.4f}")
-    print(f"  Saved to {temp_path}")
+    # Always re-evaluate the 224 model from disk so we report the saved
+    # weights (not whatever's in memory after the 384 phase).
+    from tensorflow.keras.models import load_model
+    print(f"\n--- Re-evaluating saved 224 model from {final_224_path} ---")
+    model_224_eval = load_model(final_224_path)
+    val_loss, val_acc, val_top3, val_top5 = model_224_eval.evaluate(val_ds_mix, verbose=0)
+    print(f"  [224 saved] Validation Accuracy:  {val_acc:.2%}")
+    print(f"  [224 saved] Validation Top-3 Acc: {val_top3:.2%}")
+    print(f"  [224 saved] Validation Top-5 Acc: {val_top5:.2%}")
 
     return val_acc, val_top3, val_top5
 
@@ -412,18 +445,20 @@ print("STARTING KAGGLE GPU TRAINING")
 print("=" * 60)
 
 # Model 1: EfficientNetV2S (best single model)
+# 15 epochs total (4 head + 11 fine-tune) — EfficientNetV2S converges fast
+# on this dataset. ~25-40 min on T4.
 acc1, top3_1, top5_1 = train_backbone(
     backbone_name="efficientnetv2s",
     output_path="/kaggle/working/dog_model_improved.h5",
-    epochs=30,
-    progressive=True,
+    epochs=15,
+    progressive=True,  # 384 boost — ~+1-2% acc, ~30 min extra
 )
 
 # Model 2: ConvNeXtTiny (diversity for ensemble)
 acc2, top3_2, top5_2 = train_backbone(
     backbone_name="convnext",
     output_path="/kaggle/working/dog_model_convnext.h5",
-    epochs=25,
+    epochs=12,
     progressive=True,
 )
 
