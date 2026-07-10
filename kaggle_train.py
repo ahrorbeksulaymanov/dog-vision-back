@@ -29,7 +29,6 @@ Expected time: ~45-90 min per backbone on T4 GPU
 
 import json
 import os
-import shutil
 
 import numpy as np
 import tensorflow as tf
@@ -49,65 +48,57 @@ print(f"TensorFlow version: {tf.__version__}")
 
 
 # ── 1. Locate & Prepare the Dataset ─────────────────────────────────────
+#
+# You uploaded your own zip of data/Images/ (120 snake_case breed folders).
+# Kaggle mounts it under /kaggle/input/<your-dataset-name>/...
+#
+# HOW TO FIND YOUR EXACT PATH:
+#   1. After adding the dataset, expand it in the left sidebar (Input panel)
+#   2. The path is shown at the top, e.g. /kaggle/input/stanford-dogs-dataset/
+#   3. Since the zip contains a top-level `data/` folder, the full path to
+#      your breed folders is usually:
+#        /kaggle/input/<dataset-slug>/data/Images
+#   4. Update DATA_DIR below to match what you see.
 
-KAGGLE_DATA_DIRS = [
-    "/kaggle/input/stanford-dogs-dataset/Images",
-    "/kaggle/input/stanford-dogs-dataset/images",
-    "/kaggle/input/stanfor-dog-dataset/Images",
-    "/kaggle/input/dataset/Images",
-]
+DATA_DIR = "/kaggle/input/stanford-dogs-dataset/data/Images"
 
-KAGGLE_DATA_DIR = None
-for d in KAGGLE_DATA_DIRS:
-    if os.path.isdir(d):
-        KAGGLE_DATA_DIR = d
-        break
-
-if KAGGLE_DATA_DIR is None:
+if not os.path.isdir(DATA_DIR):
+    # Fallback: try to find it by scanning /kaggle/input for the first dir
+    # with 120 subfolders.
+    print(f"DATA_DIR not found at: {DATA_DIR}")
+    print("Scanning /kaggle/input for a folder with 120 breed subfolders...")
+    found = None
     for root, dirs, _ in os.walk("/kaggle/input"):
-        if len(dirs) >= 120:
-            KAGGLE_DATA_DIR = root
+        if len(dirs) >= 120 and "Images" in os.path.basename(root):
+            found = root
             break
+        if len(dirs) >= 120:
+            found = root
+            break
+    if found:
+        DATA_DIR = found
+        print(f"  Auto-detected: {DATA_DIR}")
+    else:
+        raise RuntimeError(
+            f"\nCould not find your dataset. Expected: {DATA_DIR}\n"
+            f"Steps to fix:\n"
+            f"  1. In Kaggle, left sidebar → Input → click + Add Input\n"
+            f"  2. Find the dataset you uploaded (e.g. 'stanford-dogs-dataset')\n"
+            f"  3. Click the + to add it to this notebook\n"
+            f"  4. Expand it in the sidebar to see the actual folder path\n"
+            f"  5. Update DATA_DIR at the top of this script to match"
+        )
 
-if KAGGLE_DATA_DIR is None:
-    raise RuntimeError(
-        "Could not find Stanford Dogs Dataset. "
-        "Add it via: Add Data → search 'stanford dogs dataset'"
-    )
-
-print(f"Dataset found at: {KAGGLE_DATA_DIR}")
-breed_folders = sorted(os.listdir(KAGGLE_DATA_DIR))
+breed_folders = sorted(os.listdir(DATA_DIR))
+print(f"\nDataset ready at: {DATA_DIR}")
 print(f"  Breed folders: {len(breed_folders)}")
 print(f"  First 3: {breed_folders[:3]}")
+print(f"  Last 3:  {breed_folders[-3:]}")
 
 
-# ── 2. Rename Folders to clean snake_case ───────────────────────────────
-
-WORK_DIR = "/kaggle/working/dataset"
-if os.path.exists(WORK_DIR):
-    shutil.rmtree(WORK_DIR)
-
-os.makedirs(WORK_DIR)
-
-for folder in breed_folders:
-    folder_path = os.path.join(KAGGLE_DATA_DIR, folder)
-    if not os.path.isdir(folder_path):
-        continue
-
-    if folder.startswith("n0"):
-        clean_name = "-".join(folder.split("-")[1:]).lower()
-    else:
-        clean_name = folder.lower().replace(" ", "_").replace("-", "_")
-
-    dest = os.path.join(WORK_DIR, clean_name)
-    os.symlink(folder_path, dest)
-
-final_folders = sorted(os.listdir(WORK_DIR))
-print(f"After rename: {len(final_folders)} breed folders")
-print(f"  First 5: {final_folders[:5]}")
-print(f"  Last 5:  {final_folders[-5:]}")
-
-DATA_DIR = WORK_DIR
+# ── 2. (Renaming skipped — your folders are already snake_case) ──────────
+# Your local zip used the clean labels (affenpinscher/, chihuahua/, etc.),
+# so the script uses DATA_DIR directly. No symlink/rename pass needed.
 
 
 # ── 3. Training Pipeline (adapted from train.py) ────────────────────────
