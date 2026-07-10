@@ -56,6 +56,8 @@ data/Images/
 data/*.tar
 tests/images/
 tests/results/
+stanford_dogs_clean.zip
+*.zip
 
 # Training artifacts
 training_log*.csv
