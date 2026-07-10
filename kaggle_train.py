@@ -52,42 +52,42 @@ print(f"TensorFlow version: {tf.__version__}")
 # You uploaded your own zip of data/Images/ (120 snake_case breed folders).
 # Kaggle mounts it under /kaggle/input/<your-dataset-name>/...
 #
-# HOW TO FIND YOUR EXACT PATH:
-#   1. After adding the dataset, expand it in the left sidebar (Input panel)
-#   2. The path is shown at the top, e.g. /kaggle/input/stanford-dogs-dataset/
-#   3. Since the zip contains a top-level `data/` folder, the full path to
-#      your breed folders is usually:
-#        /kaggle/input/<dataset-slug>/data/Images
-#   4. Update DATA_DIR below to match what you see.
+# Your actual path is:
+#   /kaggle/input/datasets/mozzamshahid/stanford-dogs-dataset/data/Images
+#
+# If the path below doesn't exist, the script scans /kaggle/input to find
+# the right one automatically. If it still can't find your data, it prints
+# every directory it sees so you can pick the correct path.
 
-DATA_DIR = "/kaggle/input/stanford-dogs-dataset/data/Images"
+DATA_DIR = "/kaggle/input/datasets/mozzamshahid/stanford-dogs-dataset/data/Images"
 
 if not os.path.isdir(DATA_DIR):
-    # Fallback: try to find it by scanning /kaggle/input for the first dir
-    # with 120 subfolders.
-    print(f"DATA_DIR not found at: {DATA_DIR}")
-    print("Scanning /kaggle/input for a folder with 120 breed subfolders...")
+    print(f"Primary path not found: {DATA_DIR}")
+    print("Scanning /kaggle/input for a folder containing breed subfolders...")
     found = None
+
     for root, dirs, _ in os.walk("/kaggle/input"):
-        if len(dirs) >= 120 and "Images" in os.path.basename(root):
+        if len(dirs) >= 100:
             found = root
+            print(f"  Found {len(dirs)} subfolders in: {root}")
             break
-        if len(dirs) >= 120:
-            found = root
-            break
-    if found:
-        DATA_DIR = found
-        print(f"  Auto-detected: {DATA_DIR}")
-    else:
+
+    if found is None:
+        print("\nCouldn't auto-detect. Here are all directories under /kaggle/input:")
+        for root, dirs, _ in os.walk("/kaggle/input"):
+            for d in dirs:
+                print(f"  {os.path.join(root, d)}")
         raise RuntimeError(
-            f"\nCould not find your dataset. Expected: {DATA_DIR}\n"
-            f"Steps to fix:\n"
-            f"  1. In Kaggle, left sidebar → Input → click + Add Input\n"
-            f"  2. Find the dataset you uploaded (e.g. 'stanford-dogs-dataset')\n"
-            f"  3. Click the + to add it to this notebook\n"
-            f"  4. Expand it in the sidebar to see the actual folder path\n"
-            f"  5. Update DATA_DIR at the top of this script to match"
+            "\nCould not find your dataset. Steps to fix:\n"
+            "  1. Left sidebar → Input → click + Add Input\n"
+            "  2. Find 'mozzamshahid/stanford-dogs-dataset' (or whatever you named it)\n"
+            "  3. Click the + to add it to this notebook\n"
+            "  4. Expand it in the sidebar to see the actual folder path\n"
+            "  5. Update DATA_DIR at the top of this script to match"
         )
+
+    DATA_DIR = found
+    print(f"\nUsing: {DATA_DIR}")
 
 breed_folders = sorted(os.listdir(DATA_DIR))
 print(f"\nDataset ready at: {DATA_DIR}")
