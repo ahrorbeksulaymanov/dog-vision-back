@@ -29,16 +29,27 @@ class DogBreedPredictor:
         if isinstance(model_paths, str):
             model_paths = [model_paths]
 
+        custom_objects = {"KerasLayer": hub.KerasLayer}
+        # ConvNeXt models contain a custom LayerScale layer that h5 loading
+        # needs to know about (available location varies by TF version).
+        convnext_mod = getattr(tf.keras.applications, "convnext", None)
+        if convnext_mod is not None and hasattr(convnext_mod, "LayerScale"):
+            custom_objects["LayerScale"] = convnext_mod.LayerScale
+
         self.models = []
+        loaded_paths = []
         for path in model_paths:
             if not os.path.exists(path):
                 print(f"Warning: Model not found at {path}, skipping.")
                 continue
-            model = tf.keras.models.load_model(
-                path,
-                custom_objects={"KerasLayer": hub.KerasLayer},
-            )
+            try:
+                model = tf.keras.models.load_model(path, custom_objects=custom_objects)
+            except Exception as e:
+                print(f"Warning: Failed to load {path} ({e}), skipping.")
+                continue
             self.models.append(model)
+            loaded_paths.append(path)
+        model_paths = loaded_paths
 
         if not self.models:
             raise FileNotFoundError(
@@ -93,12 +104,15 @@ class DogBreedPredictor:
         # Get predictions from all models
         all_predictions = []
         for model in self.models:
+            # Resize to whatever this model expects (224 or 384) instead of
+            # assuming 224 — lets 384 checkpoints join the ensemble safely.
+            img_size = int(model.input_shape[1] or 224)
             if use_tta:
-                batch = preprocess_image_tta(image_bytes)
+                batch = preprocess_image_tta(image_bytes, img_size=img_size)
                 preds = model.predict(batch, verbose=0)
                 preds = np.mean(preds, axis=0)
             else:
-                image = preprocess_image(image_bytes)
+                image = preprocess_image(image_bytes, img_size=img_size)
                 preds = model.predict(image, verbose=0)[0]
             preds = self._apply_temperature(preds)
             all_predictions.append(preds)

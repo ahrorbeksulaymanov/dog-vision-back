@@ -45,26 +45,26 @@ BACKBONES = {
     "mobilenetv2": {
         "fn": tf.keras.applications.MobileNetV2,
         "size": 224,
-        "unfreeze_at": 100,
+        "unfreeze_frac": 0.4,  # unfreeze the last 40% of backbone layers
         "lr": 1e-5,
     },
     "efficientnetv2": {
         "fn": tf.keras.applications.EfficientNetV2B0,
         "size": 224,
-        "unfreeze_at": 150,
-        "lr": 5e-6,
+        "unfreeze_frac": 0.3,
+        "lr": 1e-5,
     },
     "efficientnetv2s": {
         "fn": tf.keras.applications.EfficientNetV2S,
         "size": 224,
-        "unfreeze_at": 200,
-        "lr": 5e-6,
+        "unfreeze_frac": 0.3,
+        "lr": 1e-5,
     },
     "convnext": {
         "fn": tf.keras.applications.ConvNeXtTiny,
         "size": 224,
-        "unfreeze_at": 180,
-        "lr": 5e-6,
+        "unfreeze_frac": 0.3,
+        "lr": 1e-5,
     },
 }
 
@@ -212,14 +212,9 @@ def build_data_pipeline(data_dir: str, batch_size: int, img_size: int,
     print(f"  Classes: {num_classes} breeds")
     print(f"  Train batches: {len(train_ds)}, Val batches: {len(val_ds)}")
 
-    # Rescale to [0, 1]
-    normalization = tf.keras.layers.Rescaling(1.0 / 255.0)
-
-    train_ds = train_ds.map(lambda x, y: (normalization(x), y),
-                            num_parallel_calls=tf.data.AUTOTUNE)
-    val_ds = val_ds.map(lambda x, y: (normalization(x), y),
-                        num_parallel_calls=tf.data.AUTOTUNE)
-
+    # Augmentation runs on RAW [0, 255] pixels — RandomBrightness defaults to
+    # value_range=(0, 255), so rescaling to [0, 1] first (the old bug) turned
+    # brightness jitter into ±38 shifts that destroyed the images.
     if is_training:
         # Data augmentation
         data_augmentation = tf.keras.Sequential([
@@ -236,6 +231,16 @@ def build_data_pipeline(data_dir: str, batch_size: int, img_size: int,
             num_parallel_calls=tf.data.AUTOTUNE,
         )
 
+    # Rescale to [0, 1] AFTER augmentation, matching the API's
+    # preprocess_image(). The model rescales back internally — see build_model().
+    normalization = tf.keras.layers.Rescaling(1.0 / 255.0)
+
+    train_ds = train_ds.map(lambda x, y: (normalization(x), y),
+                            num_parallel_calls=tf.data.AUTOTUNE)
+    val_ds = val_ds.map(lambda x, y: (normalization(x), y),
+                        num_parallel_calls=tf.data.AUTOTUNE)
+
+    if is_training:
         # MixUp / CutMix
         if use_mixup:
             # Randomly pick MixUp or CutMix for each batch
@@ -290,8 +295,11 @@ def build_model(num_classes: int, backbone_name: str = "mobilenetv2",
     )
     base_model.trainable = False  # Start frozen
 
-    # Each Keras Application expects its own preprocessing. Without this, the
-    # backbone produces degraded features and the head can't learn.
+    # Every Keras Application's preprocess_input expects RAW [0, 255] pixels
+    # (for EfficientNetV2/ConvNeXt it's a no-op — normalization is embedded
+    # in the backbone; for MobileNetV2 it maps 0-255 → [-1, 1]). Our pipeline
+    # and the API both send [0, 1], so scale back up to 0-255 first. This is
+    # baked into the graph, so the saved .h5 serves correctly as-is.
     preproc_map = {
         "mobilenetv2": tf.keras.applications.mobilenet_v2.preprocess_input,
         "efficientnetv2": tf.keras.applications.efficientnet_v2.preprocess_input,
@@ -303,7 +311,8 @@ def build_model(num_classes: int, backbone_name: str = "mobilenetv2",
     )
 
     inputs = tf.keras.Input(shape=(img_size, img_size, 3))
-    x = preprocess_input(inputs)
+    x = tf.keras.layers.Rescaling(255.0)(inputs)
+    x = preprocess_input(x)
     x = base_model(x, training=False)
     x = tf.keras.layers.GlobalAveragePooling2D()(x)
     x = tf.keras.layers.Dropout(0.4)(x)
@@ -315,14 +324,19 @@ def build_model(num_classes: int, backbone_name: str = "mobilenetv2",
     return model, base_model
 
 
-def unfreeze_backbone(base_model, unfreeze_from_layer: int):
-    """Unfreeze the top layers of the backbone for fine-tuning."""
+def unfreeze_backbone(base_model, unfreeze_frac: float):
+    """Unfreeze the top fraction of backbone layers for fine-tuning.
+
+    A fraction (not a hardcoded layer index) because layer counts differ per
+    backbone — a fixed index can accidentally freeze the whole backbone.
+    """
     base_model.trainable = True
-    for layer in base_model.layers[:unfreeze_from_layer]:
+    total = len(base_model.layers)
+    freeze_until = int(total * (1.0 - unfreeze_frac))
+    for layer in base_model.layers[:freeze_until]:
         layer.trainable = False
 
     trainable = sum(1 for l in base_model.layers if l.trainable)
-    total = len(base_model.layers)
     print(f"  Backbone: {trainable}/{total} layers trainable")
 
 
@@ -443,7 +457,7 @@ def train(args):
         args.data_dir, args.batch_size, img_size, use_mixup=use_mixup
     )
 
-    unfreeze_backbone(base_model, backbone_cfg["unfreeze_at"])
+    unfreeze_backbone(base_model, backbone_cfg["unfreeze_frac"])
 
     model.compile(
         optimizer=tf.keras.optimizers.AdamW(
@@ -500,7 +514,7 @@ def train(args):
         base_model = base_model_384
 
         # Fine-tune at 384
-        unfreeze_backbone(base_model, backbone_cfg["unfreeze_at"])
+        unfreeze_backbone(base_model, backbone_cfg["unfreeze_frac"])
 
         model.compile(
             optimizer=tf.keras.optimizers.AdamW(

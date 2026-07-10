@@ -6,17 +6,18 @@ from PIL import Image
 IMG_SIZE = 224
 
 
-def preprocess_image(image_bytes: bytes):
+def preprocess_image(image_bytes: bytes, img_size: int = IMG_SIZE):
     """Preprocess a single image for prediction."""
     image = Image.open(BytesIO(image_bytes)).convert("RGB")
-    image = image.resize((IMG_SIZE, IMG_SIZE))
+    image = image.resize((img_size, img_size))
     image = np.array(image, dtype=np.float32)
     image = image / 255.0
     image = np.expand_dims(image, axis=0)
     return image
 
 
-def preprocess_image_tta(image_bytes: bytes, num_augments: int = 8):
+def preprocess_image_tta(image_bytes: bytes, num_augments: int = 8,
+                         img_size: int = IMG_SIZE):
     """
     Preprocess an image with test-time augmentation (TTA) variants.
 
@@ -25,12 +26,13 @@ def preprocess_image_tta(image_bytes: bytes, num_augments: int = 8):
     image = Image.open(BytesIO(image_bytes)).convert("RGB")
 
     # Resize slightly larger for cropping
-    image = image.resize((IMG_SIZE + 32, IMG_SIZE + 32))
+    pad = 32
+    image = image.resize((img_size + pad, img_size + pad))
 
     variants = []
 
     # Original (center crop)
-    orig = _center_crop(image, IMG_SIZE)
+    orig = _center_crop(image, img_size)
     variants.append(np.array(orig, dtype=np.float32))
 
     # Horizontal flip
@@ -38,10 +40,10 @@ def preprocess_image_tta(image_bytes: bytes, num_augments: int = 8):
     variants.append(np.array(flipped, dtype=np.float32))
 
     # Corner crops
-    variants.append(np.array(image.crop((0, 0, IMG_SIZE, IMG_SIZE)), dtype=np.float32))
-    variants.append(np.array(image.crop((32, 0, 32 + IMG_SIZE, IMG_SIZE)), dtype=np.float32))
-    variants.append(np.array(image.crop((0, 32, IMG_SIZE, 32 + IMG_SIZE)), dtype=np.float32))
-    variants.append(np.array(image.crop((32, 32, 32 + IMG_SIZE, 32 + IMG_SIZE)), dtype=np.float32))
+    variants.append(np.array(image.crop((0, 0, img_size, img_size)), dtype=np.float32))
+    variants.append(np.array(image.crop((pad, 0, pad + img_size, img_size)), dtype=np.float32))
+    variants.append(np.array(image.crop((0, pad, img_size, pad + img_size)), dtype=np.float32))
+    variants.append(np.array(image.crop((pad, pad, pad + img_size, pad + img_size)), dtype=np.float32))
 
     # Flip the corner crops too
     for i in range(2, 6):

@@ -110,13 +110,13 @@ SEED = 42
 BACKBONES = {
     "efficientnetv2s": {
         "fn": tf.keras.applications.EfficientNetV2S,
-        "unfreeze_at": 200,
-        "lr": 5e-6,
+        "unfreeze_frac": 0.3,  # unfreeze the last 30% of backbone layers
+        "lr": 1e-5,
     },
     "convnext": {
         "fn": tf.keras.applications.ConvNeXtTiny,
-        "unfreeze_at": 180,
-        "lr": 5e-6,
+        "unfreeze_frac": 0.3,
+        "lr": 1e-5,
     },
 }
 
@@ -191,10 +191,11 @@ def build_data_pipeline(data_dir, batch_size, img_size, is_training=True, use_mi
     print(f"  Train batches: {len(train_ds)}, Val batches: {len(val_ds)}")
     print(f"  MixUp/CutMix: {use_mixup and is_training}")
 
-    normalization = tf.keras.layers.Rescaling(1.0 / 255.0)
-    train_ds = train_ds.map(lambda x, y: (normalization(x), y), num_parallel_calls=tf.data.AUTOTUNE)
-    val_ds = val_ds.map(lambda x, y: (normalization(x), y), num_parallel_calls=tf.data.AUTOTUNE)
-
+    # IMPORTANT — pixel scaling order:
+    # Augmentation runs on RAW [0, 255] pixels because RandomBrightness
+    # defaults to value_range=(0, 255). Rescaling to [0, 1] BEFORE it (the
+    # old bug) made brightness shifts of ±38 on [0, 1] images — pure white/
+    # black garbage — which is why training produced terrible results.
     if is_training:
         data_augmentation = tf.keras.Sequential([
             tf.keras.layers.RandomFlip("horizontal"),
@@ -209,6 +210,14 @@ def build_data_pipeline(data_dir, batch_size, img_size, is_training=True, use_mi
             num_parallel_calls=tf.data.AUTOTUNE,
         )
 
+    # Scale to [0, 1] AFTER augmentation, matching the API's
+    # preprocess_image(). The model itself rescales back to [0, 255]
+    # internally — see build_model().
+    normalization = tf.keras.layers.Rescaling(1.0 / 255.0)
+    train_ds = train_ds.map(lambda x, y: (normalization(x), y), num_parallel_calls=tf.data.AUTOTUNE)
+    val_ds = val_ds.map(lambda x, y: (normalization(x), y), num_parallel_calls=tf.data.AUTOTUNE)
+
+    if is_training:
         # MixUp/CutMix only when use_mixup=True (skip in Step A so the head
         # can learn from clean labels first).
         if use_mixup:
@@ -233,18 +242,14 @@ def build_model(num_classes, backbone_name, img_size=224):
     )
     base_model.trainable = False
 
-    # Each Keras Application expects its own preprocessing:
-    #   - EfficientNetV2 → [-1, 1]
-    #   - ConvNeXt       → [0, 1] (no scaling; channels_first in some cases)
-    # Without this, the backbone features are degraded → head can't learn.
-    preproc_map = {
-        "efficientnetv2s": tf.keras.applications.efficientnet_v2.preprocess_input,
-        "convnext": tf.keras.applications.convnext.preprocess_input,
-    }
-    preprocess_input = preproc_map.get(backbone_name, tf.keras.applications.mobilenet_v2.preprocess_input)
-
+    # EfficientNetV2 and ConvNeXt EMBED their own normalization inside the
+    # backbone and expect raw [0, 255] pixels (their preprocess_input is a
+    # no-op placeholder). The old code fed them [0, 1] images — inputs 255x
+    # smaller than expected — so the backbone produced garbage features and
+    # accuracy collapsed. The model input stays [0, 1] (what the API sends);
+    # Rescaling(255) is baked into the graph so the saved .h5 just works.
     inputs = tf.keras.Input(shape=(img_size, img_size, 3))
-    x = preprocess_input(inputs)
+    x = tf.keras.layers.Rescaling(255.0)(inputs)
     x = base_model(x, training=False)
     x = tf.keras.layers.GlobalAveragePooling2D()(x)
     x = tf.keras.layers.Dropout(0.4)(x)
@@ -256,12 +261,16 @@ def build_model(num_classes, backbone_name, img_size=224):
     return model, base_model
 
 
-def unfreeze_backbone(base_model, unfreeze_from_layer):
+def unfreeze_backbone(base_model, unfreeze_frac):
+    # Unfreeze by FRACTION, not a hardcoded layer index: layer counts differ
+    # per backbone (a fixed index like 180 could freeze the entire ConvNeXt,
+    # leaving nothing to fine-tune).
     base_model.trainable = True
-    for layer in base_model.layers[:unfreeze_from_layer]:
+    total = len(base_model.layers)
+    freeze_until = int(total * (1.0 - unfreeze_frac))
+    for layer in base_model.layers[:freeze_until]:
         layer.trainable = False
     trainable = sum(1 for l in base_model.layers if l.trainable)
-    total = len(base_model.layers)
     print(f"  Backbone: {trainable}/{total} layers trainable")
 
 
@@ -337,7 +346,7 @@ def train_backbone(backbone_name, output_path, epochs=20, progressive=True):
     callbacks = [
         tf.keras.callbacks.EarlyStopping(monitor="val_accuracy", patience=8, restore_best_weights=True),
         tf.keras.callbacks.ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=4, min_lr=1e-7, verbose=1),
-        tf.keras.callbacks.CSVLogger(f"/kaggle/working/training_log_{backbone_name}.csv"),
+        tf.keras.callbacks.CSVLogger(f"/kaggle/working/training_log_{backbone_name}.csv", append=True),
     ]
     head_epochs = max(5, epochs // 4)
     model.fit(train_ds, validation_data=val_ds, epochs=head_epochs, callbacks=callbacks, verbose=1)
@@ -348,7 +357,7 @@ def train_backbone(backbone_name, output_path, epochs=20, progressive=True):
     train_ds_mix, val_ds_mix, _, _ = build_data_pipeline(
         DATA_DIR, BATCH_SIZE, 224, is_training=True, use_mixup=True,
     )
-    unfreeze_backbone(base_model, cfg["unfreeze_at"])
+    unfreeze_backbone(base_model, cfg["unfreeze_frac"])
     model.compile(
         optimizer=tf.keras.optimizers.AdamW(learning_rate=cfg["lr"], weight_decay=1e-4),
         loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.05),
@@ -394,15 +403,16 @@ def train_backbone(backbone_name, output_path, epochs=20, progressive=True):
 
         model_384, base_model_384 = build_model(num_classes, backbone_name, img_size=384)
 
-        for layer_224 in model.layers:
-            for layer_384 in model_384.layers:
-                if layer_224.name == layer_384.name and layer_224.weights:
-                    layer_384.set_weights(layer_224.get_weights())
-                    break
+        # Copy weights by POSITION, not by name: Keras uniquifies layer names
+        # across models built in the same process (dense → dense_2, ...), so
+        # name-matching silently copies nothing and the 384 phase would train
+        # from scratch. Identical architecture + fully-conv backbone means
+        # the flat weight lists line up exactly regardless of input size.
+        model_384.set_weights(model.get_weights())
 
         model = model_384
         base_model = base_model_384
-        unfreeze_backbone(base_model, cfg["unfreeze_at"])
+        unfreeze_backbone(base_model, cfg["unfreeze_frac"])
         model.compile(
             optimizer=tf.keras.optimizers.AdamW(learning_rate=cfg["lr"] / 2, weight_decay=1e-4),
             loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.05),
@@ -444,23 +454,28 @@ print("=" * 60)
 print("STARTING KAGGLE GPU TRAINING")
 print("=" * 60)
 
+# The API serves 224x224, so the 384 phase is optional polish (~+1%) that
+# roughly DOUBLES training time. Off by default — flip it on if you have
+# GPU hours to spare. ConvNeXt gives ensemble diversity; also optional.
+PROGRESSIVE_384 = False
+TRAIN_CONVNEXT = True
+
 # Model 1: EfficientNetV2S (best single model)
-# 15 epochs total (4 head + 11 fine-tune) — EfficientNetV2S converges fast
-# on this dataset. ~25-40 min on T4.
 acc1, top3_1, top5_1 = train_backbone(
     backbone_name="efficientnetv2s",
     output_path="/kaggle/working/dog_model_improved.h5",
     epochs=15,
-    progressive=True,  # 384 boost — ~+1-2% acc, ~30 min extra
+    progressive=PROGRESSIVE_384,
 )
 
 # Model 2: ConvNeXtTiny (diversity for ensemble)
-acc2, top3_2, top5_2 = train_backbone(
-    backbone_name="convnext",
-    output_path="/kaggle/working/dog_model_convnext.h5",
-    epochs=12,
-    progressive=True,
-)
+if TRAIN_CONVNEXT:
+    acc2, top3_2, top5_2 = train_backbone(
+        backbone_name="convnext",
+        output_path="/kaggle/working/dog_model_convnext.h5",
+        epochs=12,
+        progressive=PROGRESSIVE_384,
+    )
 
 # ── 6. Summary ──────────────────────────────────────────────────────────
 
@@ -477,7 +492,8 @@ print("\n" + "=" * 60)
 print("TRAINING COMPLETE — RESULTS SUMMARY")
 print("=" * 60)
 print(f"  Model 1 (EfficientNetV2S):  acc={acc1:.2%}  top3={top3_1:.2%}  top5={top5_1:.2%}")
-print(f"  Model 2 (ConvNeXtTiny):     acc={acc2:.2%}  top3={top3_2:.2%}  top5={top5_2:.2%}")
+if TRAIN_CONVNEXT:
+    print(f"  Model 2 (ConvNeXtTiny):     acc={acc2:.2%}  top3={top3_2:.2%}  top5={top5_2:.2%}")
 print(f"\nOutput files in /kaggle/working/:")
 for f in sorted(os.listdir("/kaggle/working/")):
     if f.endswith(".h5") or f.endswith(".json"):
