@@ -61,3 +61,8 @@ stanford_dogs_clean.zip
 
 # Training artifacts
 training_log*.csv
+
+# Model weights (distributed via GitHub Releases, not git)
+*.keras
+models/**/*.h5
+models/*.h5

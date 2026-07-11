@@ -278,9 +278,11 @@ def build_model(num_classes: int, backbone_name: str = "mobilenetv2",
     if from_checkpoint and os.path.exists(from_checkpoint):
         print(f"  Loading existing model from {from_checkpoint}...")
         import tensorflow_hub as hub
+        from app.predictor import _get_layer_scale
+        custom_objects = {"KerasLayer": hub.KerasLayer, "LayerScale": _get_layer_scale()}
         model = tf.keras.models.load_model(
             from_checkpoint,
-            custom_objects={"KerasLayer": hub.KerasLayer},
+            custom_objects=custom_objects,
         )
         base_model = model.layers[1] if len(model.layers) > 1 else model.layers[0]
         return model, base_model

@@ -439,7 +439,49 @@ def train_backbone(backbone_name, output_path, epochs=20, progressive=True):
     # weights (not whatever's in memory after the 384 phase).
     from tensorflow.keras.models import load_model
     print(f"\n--- Re-evaluating saved 224 model from {final_224_path} ---")
-    model_224_eval = load_model(final_224_path)
+    # ConvNeXt's internal LayerScale layer isn't in Keras's global custom-object
+    # registry, so the legacy .h5 loader can't deserialize it without help.
+    # Its import path moved across Keras releases, so try each known location
+    # and fall back to reconstructing the class from its known source.
+    LayerScale = None
+    for modpath in (
+        "keras.src.applications.convnext",
+        "keras.applications.convnext",
+        "tensorflow.keras.applications.convnext",
+    ):
+        try:
+            _mod = __import__(modpath, fromlist=["LayerScale"])
+        except ImportError:
+            continue
+        if hasattr(_mod, "LayerScale"):
+            LayerScale = _mod.LayerScale
+            break
+
+    if LayerScale is None:
+        class LayerScale(tf.keras.layers.Layer):
+            def __init__(self, init_values, projection_dim, **kwargs):
+                super().__init__(**kwargs)
+                self.init_values = init_values
+                self.projection_dim = projection_dim
+
+            def build(self, _):
+                self.gamma = self.add_weight(
+                    shape=(self.projection_dim,),
+                    initializer=tf.keras.initializers.Constant(self.init_values),
+                    trainable=True,
+                    name="gamma",
+                )
+
+            def call(self, x):
+                return x * self.gamma
+
+            def get_config(self):
+                config = super().get_config()
+                config.update({"init_values": self.init_values, "projection_dim": self.projection_dim})
+                return config
+
+    custom_objects = {"LayerScale": LayerScale}
+    model_224_eval = load_model(final_224_path, custom_objects=custom_objects)
     val_loss, val_acc, val_top3, val_top5 = model_224_eval.evaluate(val_ds_mix, verbose=0)
     print(f"  [224 saved] Validation Accuracy:  {val_acc:.2%}")
     print(f"  [224 saved] Validation Top-3 Acc: {val_top3:.2%}")

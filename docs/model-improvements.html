@@ -1,0 +1,286 @@
+<title>Dog Vision — Model Improvement Report</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #FBFAF7;
+    --surface: #FFFFFF;
+    --surface-2: #F4F1EA;
+    --ink: #262019;
+    --ink-2: #5A5147;
+    --ink-3: #8B8175;
+    --line: #E7E0D4;
+    --baseline: #C3BCB0;   /* the "before" — deliberately recessive */
+    --step-1: #E0A75C;     /* new · light */
+    --step-2: #CB863A;     /* new · mid  */
+    --hero:   #A85D18;     /* ensemble · deepest */
+    --teal:   #2E7D74;     /* secondary accent for tags */
+    --good-bg: #E6EFE9;
+    --radius: 12px;
+    --maxw: 940px;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: "SF Mono", "JetBrains Mono", "Roboto Mono", ui-monospace, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17140F;
+      --surface: #201C16;
+      --surface-2: #2A251E;
+      --ink: #EFE9DE;
+      --ink-2: #C3BAAB;
+      --ink-3: #8E8577;
+      --line: #342E25;
+      --baseline: #5C554A;
+      --step-1: #E0A75C;
+      --step-2: #D08E43;
+      --hero: #E8934A;
+      --teal: #58B3A8;
+      --good-bg: #23332C;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #FBFAF7; --surface: #FFFFFF; --surface-2: #F4F1EA; --ink: #262019;
+    --ink-2: #5A5147; --ink-3: #8B8175; --line: #E7E0D4; --baseline: #C3BCB0;
+    --step-1: #E0A75C; --step-2: #CB863A; --hero: #A85D18; --teal: #2E7D74;
+    --good-bg: #E6EFE9;
+  }
+  :root[data-theme="dark"] {
+    --bg: #17140F; --surface: #201C16; --surface-2: #2A251E; --ink: #EFE9DE;
+    --ink-2: #C3BAAB; --ink-3: #8E8577; --line: #342E25; --baseline: #5C554A;
+    --step-1: #E0A75C; --step-2: #D08E43; --hero: #E8934A; --teal: #58B3A8;
+    --good-bg: #23332C;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--sans); line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: var(--maxw); margin: 0 auto; padding: clamp(28px, 5vw, 64px) clamp(20px, 5vw, 44px); }
+
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--teal); font-weight: 600; margin: 0 0 14px;
+  }
+  h1 {
+    font-family: var(--serif); font-weight: 600; font-size: clamp(30px, 5.5vw, 50px);
+    line-height: 1.08; letter-spacing: -0.01em; margin: 0 0 16px; text-wrap: balance;
+  }
+  .lede { font-size: clamp(16px, 2.2vw, 19px); color: var(--ink-2); max-width: 60ch; margin: 0; }
+
+  section { margin-top: clamp(40px, 6vw, 72px); }
+  h2 {
+    font-family: var(--serif); font-weight: 600; font-size: clamp(21px, 3vw, 27px);
+    letter-spacing: -0.01em; margin: 0 0 6px; text-wrap: balance;
+  }
+  .section-note { color: var(--ink-3); font-size: 14px; margin: 0 0 24px; max-width: 62ch; }
+
+  /* Hero delta */
+  .hero-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-top: 30px; }
+  .stat {
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 22px 22px 20px;
+  }
+  .stat .k { font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); margin: 0 0 10px; }
+  .stat .v {
+    font-family: var(--serif); font-size: clamp(30px, 5vw, 42px); font-weight: 600;
+    line-height: 1; letter-spacing: -0.02em; font-variant-numeric: tabular-nums;
+  }
+  .stat .v small { font-size: 0.5em; font-weight: 600; color: var(--ink-3); letter-spacing: 0; }
+  .stat .sub { font-size: 13px; color: var(--ink-2); margin: 10px 0 0; }
+  .stat.accent .v { color: var(--hero); }
+  .delta-up { color: var(--teal); font-weight: 600; }
+
+  /* Dot plot */
+  .chart { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 26px clamp(18px,3vw,30px) 20px; }
+  .chart svg { width: 100%; height: auto; display: block; overflow: visible; }
+  .axis-label { font-family: var(--mono); font-size: 11px; fill: var(--ink-3); letter-spacing: 0.04em; }
+  .row-label { font-family: var(--sans); font-size: 13.5px; fill: var(--ink); font-weight: 500; }
+  .row-sub { font-family: var(--mono); font-size: 11px; fill: var(--ink-3); }
+  .val-label { font-family: var(--mono); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .grid-line { stroke: var(--line); stroke-width: 1; }
+  .connector { stroke: var(--line); stroke-width: 2; }
+  .zoom-note { font-family: var(--mono); font-size: 11px; color: var(--ink-3); margin: 14px 0 0; }
+  .legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: middle; margin-right: 5px; }
+
+  /* Table */
+  .table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+  table { border-collapse: collapse; width: 100%; min-width: 520px; font-size: 14px; }
+  th, td { text-align: right; padding: 13px 16px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  th:first-child, td:first-child { text-align: left; }
+  thead th { font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-3); font-weight: 600; background: var(--surface-2); }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr.hero-row td { background: var(--good-bg); font-weight: 600; }
+  tbody tr.hero-row td:first-child { color: var(--hero); }
+  .model-name { font-weight: 600; }
+  .tag { font-family: var(--mono); font-size: 10.5px; color: var(--teal); border: 1px solid var(--line); padding: 1px 6px; border-radius: 20px; margin-left: 8px; letter-spacing: 0.03em; white-space: nowrap; }
+
+  /* Changes list */
+  .changes { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  .change { background: var(--surface); padding: 20px clamp(18px,3vw,26px); display: grid; grid-template-columns: 34px 1fr; gap: 16px; align-items: start; }
+  .change .n { font-family: var(--mono); font-size: 13px; color: var(--hero); font-weight: 600; padding-top: 2px; }
+  .change h3 { font-family: var(--sans); font-size: 15.5px; margin: 0 0 5px; font-weight: 650; }
+  .change p { margin: 0; font-size: 14px; color: var(--ink-2); }
+  .change .was { color: var(--ink-3); }
+  .change .now { color: var(--teal); font-weight: 600; }
+
+  footer { margin-top: clamp(48px, 7vw, 80px); padding-top: 26px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: baseline; justify-content: space-between; }
+  .sig { font-family: var(--serif); font-size: 19px; }
+  .sig small { display: block; font-family: var(--mono); font-size: 11px; color: var(--ink-3); letter-spacing: 0.08em; text-transform: uppercase; margin-top: 4px; font-style: normal; }
+  .meta { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); text-align: right; }
+</style>
+
+<div class="wrap">
+  <header>
+    <p class="eyebrow">Model Report · Dog Vision API</p>
+    <h1>Rebuilt the breed classifier from a single small model into a calibrated two-model ensemble.</h1>
+    <p class="lede">The old classifier was a single MobileNetV2 with a training pipeline that had silent bugs. We fixed the pipeline, moved to two stronger backbones, and combined them. On the same 1,280-image validation set, top-1 accuracy rose from <strong>88.05%</strong> to <strong>92.42%</strong> — roughly a third fewer wrong guesses.</p>
+  </header>
+
+  <section aria-label="Headline results">
+    <div class="hero-grid">
+      <div class="stat">
+        <p class="k">Top-1 · before</p>
+        <p class="v">88.05<small>%</small></p>
+        <p class="sub">MobileNetV2, single model</p>
+      </div>
+      <div class="stat accent">
+        <p class="k">Top-1 · after</p>
+        <p class="v">92.42<small>%</small></p>
+        <p class="sub"><span class="delta-up">▲ 4.37 pts</span> · ensemble of two</p>
+      </div>
+      <div class="stat">
+        <p class="k">Errors removed</p>
+        <p class="v">36<small>%</small></p>
+        <p class="sub">wrong answers: 11.95% → 7.58%</p>
+      </div>
+      <div class="stat">
+        <p class="k">Top-3 · after</p>
+        <p class="v">99.30<small>%</small></p>
+        <p class="sub">correct breed in the top 3 nearly always</p>
+      </div>
+    </div>
+  </section>
+
+  <section aria-label="Accuracy comparison">
+    <h2>Top-1 accuracy, model by model</h2>
+    <p class="section-note">Every model was scored on the identical 1,280 validation images. Bars are ordered from the old baseline to the final ensemble; shade deepens as accuracy climbs.</p>
+    <div class="chart">
+      <!-- Dot plot. x-axis zoomed to 86–94% (labeled) so small gains are readable. -->
+      <svg viewBox="0 0 720 300" role="img" aria-label="Dot plot of top-1 accuracy: old model 88.05%, EfficientNetV2S 89.92%, ConvNeXtTiny 90.78%, ensemble 92.42%.">
+        <!-- gridlines at 86,88,90,92,94 ; plot area x: 210..690 maps 86..94 -->
+        <g class="grid">
+          <line class="grid-line" x1="210" y1="34" x2="210" y2="250"></line>
+          <line class="grid-line" x1="330" y1="34" x2="330" y2="250"></line>
+          <line class="grid-line" x1="450" y1="34" x2="450" y2="250"></line>
+          <line class="grid-line" x1="570" y1="34" x2="570" y2="250"></line>
+          <line class="grid-line" x1="690" y1="34" x2="690" y2="250"></line>
+          <text class="axis-label" x="210" y="272" text-anchor="middle">86%</text>
+          <text class="axis-label" x="330" y="272" text-anchor="middle">88%</text>
+          <text class="axis-label" x="450" y="272" text-anchor="middle">90%</text>
+          <text class="axis-label" x="570" y="272" text-anchor="middle">92%</text>
+          <text class="axis-label" x="690" y="272" text-anchor="middle">94%</text>
+        </g>
+        <!-- Row 1: old  88.05 -> x = 210 + (88.05-86)/8*480 = 333 -->
+        <g>
+          <text class="row-label" x="0" y="66">Old baseline</text>
+          <text class="row-sub" x="0" y="82">MobileNetV2 · 2.4M</text>
+          <line class="connector" x1="210" y1="72" x2="333" y2="72"></line>
+          <circle cx="333" cy="72" r="8" fill="var(--baseline)"></circle>
+          <text class="val-label" x="349" y="76" fill="var(--ink-2)">88.05%</text>
+        </g>
+        <!-- Row 2: eff 89.92 -> x = 210 + (89.92-86)/8*480 = 445.2 -->
+        <g>
+          <text class="row-label" x="0" y="128">EfficientNetV2S</text>
+          <text class="row-sub" x="0" y="144">21.0M · new</text>
+          <line class="connector" x1="210" y1="134" x2="445" y2="134"></line>
+          <circle cx="445" cy="134" r="8" fill="var(--step-1)"></circle>
+          <text class="val-label" x="461" y="138" fill="var(--ink-2)">89.92%</text>
+        </g>
+        <!-- Row 3: conv 90.78 -> x = 210 + (90.78-86)/8*480 = 496.8 -->
+        <g>
+          <text class="row-label" x="0" y="190">ConvNeXtTiny</text>
+          <text class="row-sub" x="0" y="206">28.3M · new</text>
+          <line class="connector" x1="210" y1="196" x2="497" y2="196"></line>
+          <circle cx="497" cy="196" r="8" fill="var(--step-2)"></circle>
+          <text class="val-label" x="513" y="200" fill="var(--ink-2)">90.78%</text>
+        </g>
+        <!-- Row 4: ensemble 92.42 -> x = 210 + (92.42-86)/8*480 = 595.2 -->
+        <g>
+          <text class="row-label" x="0" y="238" font-weight="700">Ensemble</text>
+          <text class="row-sub" x="0" y="254">both, averaged</text>
+          <line class="connector" x1="210" y1="244" x2="595" y2="244" stroke="var(--hero)" stroke-opacity="0.35"></line>
+          <circle cx="595" cy="244" r="9" fill="var(--hero)"></circle>
+          <text class="val-label" x="613" y="248" fill="var(--hero)">92.42%</text>
+        </g>
+      </svg>
+      <p class="zoom-note">Horizontal axis starts at 86%, not 0%, to make the differences between strong models visible.</p>
+    </div>
+  </section>
+
+  <section aria-label="Full metrics">
+    <h2>Every number, side by side</h2>
+    <p class="section-note">Top-3 and top-5 count a prediction as correct if the true breed appears among the model's 3 or 5 most-confident guesses — a useful signal for a UI that shows a few candidates.</p>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th>Model</th><th>Params</th><th>Top-1</th><th>Top-3</th><th>Top-5</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="model-name">Old — MobileNetV2</td><td>2.4M</td><td>88.05%</td><td>96.80%</td><td>97.89%</td></tr>
+          <tr><td class="model-name">EfficientNetV2S</td><td>21.0M</td><td>89.92%</td><td>98.67%</td><td>99.45%</td></tr>
+          <tr><td class="model-name">ConvNeXtTiny</td><td>28.3M</td><td>90.78%</td><td>98.75%</td><td>99.53%</td></tr>
+          <tr class="hero-row"><td class="model-name">Ensemble (new)</td><td>49.3M</td><td>92.42%</td><td>99.30%</td><td>99.69%</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-label="What changed">
+    <h2>What we changed, and why it moved the number</h2>
+    <p class="section-note">Five changes, from the least visible to the most. The pipeline fix came first — without it, the bigger models would have learned from corrupted inputs.</p>
+    <div class="changes">
+      <div class="change">
+        <span class="n">01</span>
+        <div>
+          <h3>Fixed a silent input-scaling bug in the training pipeline</h3>
+          <p>Images were being brightened and shifted <em>after</em> being scaled to 0–1, which turned augmented pictures into near-white noise. Every model trained on that data was learning from garbage. We corrected the order so augmentation runs on real pixels.</p>
+        </div>
+      </div>
+      <div class="change">
+        <span class="n">02</span>
+        <div>
+          <h3>Replaced the backbone with two modern ones</h3>
+          <p><span class="was">MobileNetV2 (2.4M parameters)</span> → <span class="now">EfficientNetV2S and ConvNeXtTiny</span>. Larger, more recent vision models that separate visually similar breeds far better.</p>
+        </div>
+      </div>
+      <div class="change">
+        <span class="n">03</span>
+        <div>
+          <h3>Combined the two models into an ensemble</h3>
+          <p>The API averages both models' predictions. Where one hesitates, the other often decides — which is why the ensemble (92.42%) beats either model alone (89.92% / 90.78%).</p>
+        </div>
+      </div>
+      <div class="change">
+        <span class="n">04</span>
+        <div>
+          <h3>Calibrated the confidence scores</h3>
+          <p>Temperature scaling (T=0.67 and T=0.73) makes each model's reported confidence match how often it is actually right — so the "unknown breed" threshold and the top-3 percentages mean what they say.</p>
+        </div>
+      </div>
+      <div class="change">
+        <span class="n">05</span>
+        <div>
+          <h3>Made the evaluation trustworthy</h3>
+          <p>The old figure came from just 25 hand-picked images. Every number here is measured on a held-out validation set of <strong>4,116 images</strong> (1,280 sampled for this head-to-head), so the comparison is fair and repeatable.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="sig">Mozzam<small>Dog Vision · Model Work</small></div>
+    <div class="meta">120 breeds · Stanford Dogs<br>Measured on 1,280 held-out images</div>
+  </footer>
+</div>
