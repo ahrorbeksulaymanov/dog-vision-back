@@ -78,6 +78,20 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+### Download the models
+
+The trained weights are too large for git, so they're published as a
+[**GitHub Release**](https://github.com/MozzamShahid/dog-vision-back/releases/tag/v2.0-ensemble).
+Download both files into the `models/` folder:
+
+```bash
+gh release download v2.0-ensemble --dir models
+# or download manually from the Releases page into models/
+```
+
+The calibration files (`models/*_temp_scale.json`) and `data/unique_breeds.json`
+are already in the repo — you only need the two `.keras` files.
+
 ## Running the server
 
 ```bash
