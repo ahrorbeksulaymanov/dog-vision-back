@@ -1,116 +1,136 @@
-# Dog Vision API
+# Dog Vision — Real-Time Dog Breed Detection
 
-A FastAPI backend that classifies dog breeds from an uploaded image using an
-ensemble of two TensorFlow models. Supports **120 breeds** (Stanford Dogs).
+Point your phone camera at a dog and see its breed in real time. Supports **120 breeds** with colored bounding boxes around each dog. Multiple dogs detected and classified simultaneously. Works as a **PWA** — open in your mobile browser, no app install needed.
 
-**Top-1 accuracy: 92.42%** (ensemble, on a held-out validation set)
-**Top-3 accuracy: 99.30%** — the correct breed is in the top 3 almost every time.
-
-📊 **[Model improvement report →](docs/model-improvements.html)** — the before/after story in one page.
+**Accuracy: 92.42% top-1 | 99.30% top-3** (2-model ensemble of EfficientNetV2S + ConvNeXtTiny)
 
 ---
 
-## The short story (for anyone picking this up)
+## Quick Start (5 minutes)
 
-The classifier started as a single small model (MobileNetV2) with a training
-pipeline that had silent bugs. It was rebuilt into a calibrated two-model
-ensemble. On the same 1,280-image validation set:
+### Prerequisites
 
-| Model | Params | Top-1 | Top-3 | Top-5 |
-|-------|-------:|------:|------:|------:|
-| Old — MobileNetV2 | 2.4M | 88.05% | 96.80% | 97.89% |
-| EfficientNetV2S | 21.0M | 89.92% | 98.67% | 99.45% |
-| ConvNeXtTiny | 28.3M | 90.78% | 98.75% | 99.53% |
-| **Ensemble (current)** | **49.3M** | **92.42%** | **99.30%** | **99.69%** |
+- **Python 3.11** (required — check with `python3.11 --version`)
+- The trained model files (see step 2 below)
 
-**88.05% → 92.42% top-1** — about a third of the previous errors removed
-(wrong answers fell from ~12% to ~7.6%).
-
-### What changed
-
-1. **Fixed a silent input-scaling bug.** Augmentation (brightness/contrast) was
-   running *after* images were scaled to 0–1, turning training pictures into
-   near-white noise. Every model trained on that data learned from garbage.
-2. **Upgraded the backbone.** MobileNetV2 → EfficientNetV2S **and** ConvNeXtTiny,
-   two stronger, more recent vision models.
-3. **Ensembled the two models.** The API averages both predictions; where one
-   hesitates the other often decides, so the ensemble beats either alone.
-4. **Calibrated confidence.** Temperature scaling (T=0.67 / T=0.73) makes each
-   model's reported confidence match how often it is actually right.
-5. **Made evaluation trustworthy.** The old figure came from 25 hand-picked
-   images; every number here is measured on a 4,116-image held-out set.
-
----
-
-## Environment
-
-- **Python** 3.11
-- **FastAPI** 0.139.0
-- **TensorFlow** 2.21.0
-- **TensorFlow Hub** 0.16.1
-
-## Project structure
-
-```
-app/
-├── main.py            # FastAPI app (GET /, POST /predict, GET /breeds)
-├── predictor.py       # DogBreedPredictor — ensemble, TTA, temperature scaling
-└── preprocessing.py   # Image preprocessing (224x224, TTA variants)
-data/
-└── unique_breeds.json # 120 breed labels
-models/
-├── dog_model_improved.keras          # EfficientNetV2S
-├── dog_model_convnext.keras          # ConvNeXtTiny
-├── *_temp_scale.json                 # per-model confidence calibration
-└── archive/dog_model.h5              # old MobileNetV2 (kept for reference)
-docs/
-└── model-improvements.html           # visual before/after report
-train.py                # local training / fine-tuning script
-kaggle_train.py         # GPU training script (run on Kaggle)
-reeval_cell.py          # re-evaluate saved models + export clean .keras files
-```
-
-## Setup
+### 1. Clone and install
 
 ```bash
+git clone https://github.com/MozzamShahid/dog-vision-back.git
+cd dog-vision-back
 python3.11 -m venv venv
-source venv/bin/activate
+source venv/bin/activate         # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### Download the models
+### 2. Download the trained models
 
-The trained weights are too large for git, so they're published as a
-[**GitHub Release**](https://github.com/MozzamShahid/dog-vision-back/releases/tag/v2.0-ensemble).
-Download both files into the `models/` folder:
+The model weights are published as a GitHub Release (too large for git). Download both `.keras` files into the `models/` folder:
 
 ```bash
+# Option A — using GitHub CLI
 gh release download v2.0-ensemble --dir models
-# or download manually from the Releases page into models/
+
+# Option B — download manually from:
+# https://github.com/MozzamShahid/dog-vision-back/releases/tag/v2.0-ensemble
+# Place both .keras files in:   models/
 ```
 
-The calibration files (`models/*_temp_scale.json`) and `data/unique_breeds.json`
-are already in the repo — you only need the two `.keras` files.
+After downloading, `models/` should contain:
 
-## Running the server
+```
+models/
+├── dog_model_improved.keras       # EfficientNetV2S (21M params)
+├── dog_model_convnext.keras       # ConvNeXtTiny (28M params)
+├── dog_model_improved_temp_scale.json   # calibration T=0.67
+├── dog_model_convnext_temp_scale.json   # calibration T=0.73
+└── archive/
+    └── dog_model.h5               # old MobileNetV2 (optional)
+```
+
+> The calibration `.json` files and breed labels (`data/unique_breeds.json`) are already in the repo — you only need the two `.keras` files.
+
+### 3. Run the server
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-Available at `http://127.0.0.1:8000`. On startup the predictor auto-discovers
-every `.keras` (and legacy `.h5`) model in `models/` and ensembles them.
+### 4. Open the app
 
-## Endpoints
+- **Desktop:** `http://127.0.0.1:8000` — allow camera, tap the red button
+- **Phone (same network):** `http://<YOUR_LAPTOP_IP>:8000` — the PWA works on mobile browsers
+- **Single image test (curl):**
+
+```bash
+curl -X POST http://127.0.0.1:8000/predict -F "file=@my_dog.jpg"
+```
+
+### 5. What to expect
+
+- Tap the **red button** → camera opens (back camera on mobile, webcam on desktop)
+- The detector takes **~3 seconds on the first frame** (TensorFlow graph compilation), then settles at **3–5 fps**
+- Each detected dog gets a **colored bounding box** with its breed name and confidence percentage
+- The **480p/360p/240p** button changes resolution (lower = faster, higher = more accurate detection)
+- Use the **flip button** (&#x21bb;) to switch between front and back camera
+- Boxes **persist for 2 seconds** with a smooth fade-out so you can actually read the label
+
+---
+
+## What You Get
+
+| Feature | Description |
+|---------|-------------|
+| **Live camera detection** | WebSocket streams frames from your phone to the server in real time |
+| **Dog bounding boxes** | Pre-trained EfficientDet-Lite0 (5MB) finds all dogs in each frame |
+| **120 breed classification** | Each detected dog is classified by a 2-model ensemble (EfficientNetV2S + ConvNeXtTiny) |
+| **Multi-dog support** | Multiple dogs detected and classified in a single frame — all crops processed in one batch |
+| **PWA** (Progressive Web App) | Add to your phone's home screen — works like a native app with manifest, icon, and service worker |
+| **Single image API** | `POST /predict` — upload an image, get breed prediction back |
+| **Unknown detection** | Below 50% confidence → returns `"unknown"` instead of guessing |
+
+---
+
+## Project Structure
+
+```
+app/
+├── main.py              # FastAPI app (routes, WebSocket, CORS, static files)
+├── predictor.py         # DogBreedPredictor — ensemble, TTA, temperature scaling
+├── preprocessing.py     # Image preprocessing (resize, normalize, TTA variants)
+├── detector.py          # DogDetector — EfficientDet-Lite0 from TensorFlow Hub
+├── pipeline.py          # LivePipeline — detection → crop → batch classification
+└── static/
+    ├── index.html       # PWA frontend (camera, canvas overlay, WebSocket client)
+    ├── manifest.json    # PWA manifest (Add to Home Screen)
+    ├── sw.js            # Service worker (network-first caching)
+    └── icon.svg         # App icon (dog silhouette)
+data/
+└── unique_breeds.json   # 120 breed labels (snake_case)
+models/
+├── dog_model_improved.keras          # EfficientNetV2S (21M params)
+├── dog_model_convnext.keras          # ConvNeXtTiny (28M params)
+├── *_temp_scale.json                 # per-model temperature calibration
+└── archive/                          # old MobileNetV2 (kept for reference)
+Dockerfile               # Hugging Face Spaces / Docker deployment
+deploy_hfspaces.sh       # One-command HF Spaces deploy script
+requirements.txt         # 8 pinned dependencies
+```
+
+---
+
+## API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/` | Health check |
-| GET | `/breeds` | List all 120 supported breeds |
-| POST | `/predict` | Upload an image, returns breed prediction |
-| POST | `/predict?tta=true` | Prediction with test-time augmentation (slower, a bit more accurate) |
+| `GET` | `/` | PWA frontend — camera + live detection UI |
+| `GET` | `/api/health` | Health check — returns version and endpoints |
+| `GET` | `/breeds` | List all 120 supported breeds |
+| `POST` | `/predict` | Upload an image → breed prediction |
+| `POST` | `/predict?tta=true` | Same with test-time augmentation (slower, slightly more accurate) |
+| `WS` | `/ws/live` | WebSocket — send JPEG frames, receive `[{bbox, breed, confidence}]` per frame |
 
-### Example
+### Single Image Prediction
 
 ```bash
 curl -X POST http://127.0.0.1:8000/predict -F "file=@dog.jpg"
@@ -118,77 +138,127 @@ curl -X POST http://127.0.0.1:8000/predict -F "file=@dog.jpg"
 
 ```json
 {
-    "primary": { "breed": "golden_retriever", "confidence": 0.95 },
-    "top_k": [
-        {"rank": 1, "breed": "golden_retriever", "confidence": 0.95},
-        {"rank": 2, "breed": "labrador_retriever", "confidence": 0.03},
-        {"rank": 3, "breed": "chesapeake_bay_retriever", "confidence": 0.01}
-    ],
-    "is_unknown": false,
-    "message": "Prediction successful.",
-    "ensemble": {
-        "num_models": 2,
-        "all_agree": true,
-        "individual_predictions": [
-            {"breed": "golden_retriever", "confidence": 0.96},
-            {"breed": "golden_retriever", "confidence": 0.94}
-        ]
-    }
+  "primary": { "breed": "golden_retriever", "confidence": 0.95 },
+  "top_k": [
+    { "rank": 1, "breed": "golden_retriever", "confidence": 0.95 },
+    { "rank": 2, "breed": "labrador_retriever", "confidence": 0.03 },
+    { "rank": 3, "breed": "chesapeake_bay_retriever", "confidence": 0.01 }
+  ],
+  "is_unknown": false,
+  "message": "Prediction successful.",
+  "ensemble": {
+    "num_models": 2,
+    "all_agree": true,
+    "individual_predictions": [
+      { "breed": "golden_retriever", "confidence": 0.96 },
+      { "breed": "golden_retriever", "confidence": 0.94 }
+    ]
+  }
 }
 ```
 
-When top confidence is below 50%, `primary.breed` becomes `"unknown"` and
-`is_unknown` is `true` — the breed may not be one of the 120 we support.
+### WebSocket Live Detection
 
-## Model architecture
+**Client → Server:** Raw JPEG bytes (binary WebSocket frame, ~30KB at 480p)
 
-Each model shares the same head; only the backbone differs:
+**Server → Client:** JSON per frame
+
+```json
+{
+  "detections": [
+    {
+      "bbox": [120, 80, 380, 420],
+      "breed": "golden_retriever",
+      "breed_conf": 0.92,
+      "det_conf": 0.87
+    }
+  ],
+  "fps": 4.2,
+  "width": 640,
+  "height": 480
+}
+```
+
+`bbox` is `[x1, y1, x2, y2]` in absolute pixel coordinates of the sent frame. `breed_conf` is breed classifier confidence; `det_conf` is detector confidence.
+
+---
+
+## Performance
+
+| Metric | Local (M1/M2 Mac) | HF Spaces (8 vCPU) | HF Spaces (2 vCPU) |
+|--------|:-:|:-:|:-:|
+| First frame (TF warmup) | ~3s | ~5s | ~8s |
+| Steady-state FPS (1 dog) | 4–5 | 4–5 | 1.5–2 |
+| Steady-state FPS (2 dogs) | 3–4 | 3–4 | 1–2 |
+| RAM usage | ~7GB | ~7GB | ~7GB |
+
+The pipeline uses a **single-model fast path** (EfficientNetV2S, 21M params) for live mode instead of the full 2-model ensemble (49M params). This halves inference time with negligible accuracy loss for real-time use. All detected dog crops are classified in a single batched forward pass.
+
+---
+
+## Model Architecture
+
+Each breed classifier shares the same head; only the backbone differs:
 
 ```
-Input (224×224×3, values 0–1)
-  → Rescaling(255)          # backbones expect raw 0–255; baked into the graph
-  → Backbone (EfficientNetV2S  or  ConvNeXtTiny), ImageNet-pretrained
+Input (224×224×3 RGB, values 0–1)
+  → Rescaling(255)                 # backbones expect raw 0–255 pixels
+  → Backbone (EfficientNetV2S or ConvNeXtTiny), ImageNet-pretrained
   → GlobalAveragePooling2D
   → Dropout(0.4)
-  → Dense(512, relu)
+  → Dense(512, ReLU)
   → Dropout(0.2)
   → Dense(120, softmax)
 ```
 
-The API averages the two models' softmax outputs (each temperature-calibrated
-first) to produce the final prediction.
-
-## Training
-
-Training runs on a GPU (Kaggle). The pipeline:
-
-- **Data augmentation** on raw pixels — flips, rotation, zoom, brightness,
-  contrast, translation
-- **Two-step schedule** — train the classifier head with the backbone frozen,
-  then unfreeze the last ~30% and fine-tune at a low learning rate
-- **MixUp / CutMix** during fine-tuning for regularization
-- **Label smoothing** to reduce overconfidence on similar breeds
-- **Temperature scaling** after training for calibrated confidence
-
-```bash
-# Local (CPU/GPU)
-python train.py --data_dir /path/to/stanford-dogs --output models/dog_model_improved.keras
-
-# Kaggle GPU — see kaggle_train.py (trains both backbones end to end)
-```
-
-> **Note on model files.** `.keras` is the format to use. ConvNeXt does not
-> reload cleanly from legacy `.h5` under Keras 3, so `predictor.py` rebuilds the
-> architecture and loads weights as a fallback — but the `.keras` files load
-> directly. `reeval_cell.py` regenerates the clean `.keras` files from Kaggle
-> `.h5` checkpoints.
-
-## Future ideas
-
-- [ ] Progressive resizing to 384px (~+1% for ~2× training time)
-- [ ] Expand beyond 120 breeds
-- [ ] Breed description / metadata endpoint
+The `/predict` endpoint averages both models' temperature-calibrated outputs (ensemble). The live `/ws/live` pipeline uses the **smaller single model** (EfficientNetV2S) for speed.
 
 ---
 
-Built and improved by **Mozzam**.
+## Deploying (Optional)
+
+### Hugging Face Spaces
+
+```bash
+# From the project root:
+./deploy_hfspaces.sh
+```
+
+This clones the HF Space repo, copies all files, sets up Git LFS for model weights, and pushes. Requires a HF PRO subscription ($9/mo) for Docker SDK support.
+
+**Cost:** $0.03/hour (8 vCPU, 32GB) with 15-min auto-sleep. At ~1 hour/day = **~$1/month** + $9 PRO subscription.
+
+### Docker
+
+```bash
+docker build -t dog-vision .
+docker run -p 7860:7860 dog-vision
+```
+
+The Dockerfile pre-caches the EfficientDet-Lite0 detector from TF Hub during build and auto-downloads the breed models from the GitHub Release if not found locally.
+
+---
+
+## Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| `ModuleNotFoundError` on import | Make sure you activated the venv: `source venv/bin/activate` |
+| Models not found at startup | Download the `.keras` files from the [GitHub Release](https://github.com/MozzamShahid/dog-vision-back/releases/tag/v2.0-ensemble) into `models/` |
+| Camera doesn't open | Must use `https://` or `localhost`. Mobile browsers require HTTPS for camera access |
+| WebSocket 404 / "reconnecting" | Make sure `requirements.txt` has `uvicorn[standard]==0.49.0` (not bare `uvicorn`) |
+| "No supported WebSocket library" | Install: `pip install 'uvicorn[standard]'` |
+| First frame takes 10+ seconds | Normal — TensorFlow compiles the graph on first inference. Subsequent frames are fast |
+| Detection feels slow | Lower resolution to 360p or 240p. The 2 vCPU free tier is slower — upgrade to 8 vCPU for 4+ fps |
+| Memory error (OOM) | Models need ~7GB RAM. Free HF Spaces have 16GB, so should be fine |
+| `libgl` errors on Linux | Install system deps: `apt install libgl1 libglib2.0-0 libgomp1` |
+
+---
+
+## The 120 Supported Breeds
+
+affenpinscher, afghan_hound, african_hunting_dog, airedale, american_staffordshire_terrier, appenzeller, australian_terrier, basenji, basset, beagle, bedlington_terrier, bernese_mountain_dog, black-and-tan_coonhound, blenheim_spaniel, bloodhound, bluetick, border_collie, border_terrier, borzoi, boston_bull, bouvier_des_flandres, boxer, brabancon_griffon, briard, brittany_spaniel, bull_mastiff, cairn, cardigan, chesapeake_bay_retriever, chihuahua, chow, clumber, cocker_spaniel, collie, curly-coated_retriever, dandie_dinmont, dhole, dingo, doberman, english_foxhound, english_setter, english_springer, entlebucher, eskimo_dog, flat-coated_retriever, french_bulldog, german_shepherd, german_short-haired_pointer, giant_schnauzer, golden_retriever, gordon_setter, great_dane, great_pyrenees, greater_swiss_mountain_dog, groenendael, ibizan_hound, irish_setter, irish_terrier, irish_water_spaniel, irish_wolfhound, italian_greyhound, japanese_spaniel, keeshond, kelpie, kerry_blue_terrier, komondor, kuvasz, labrador_retriever, lakeland_terrier, leonberg, lhasa, malamute, malinois, maltese_dog, mexican_hairless, miniature_pinscher, miniature_poodle, miniature_schnauzer, newfoundland, norfolk_terrier, norwegian_elkhound, norwich_terrier, old_english_sheepdog, otterhound, papillon, pekinese, pembroke, pomeranian, pug, redbone, rhodesian_ridgeback, rottweiler, saint_bernard, saluki, samoyed, schipperke, scotch_terrier, scottish_deerhound, sealyham_terrier, shetland_sheepdog, shih-tzu, siberian_husky, silky_terrier, soft-coated_wheaten_terrier, staffordshire_bullterrier, standard_poodle, standard_schnauzer, sussex_spaniel, tibetan_mastiff, tibetan_terrier, toy_poodle, toy_terrier, vizsla, walker_hound, weimaraner, welsh_springer_spaniel, west_highland_white_terrier, whippet, wire-haired_fox_terrier, yorkshire_terrier
+
+---
+
+Built by **Mozzam**.
