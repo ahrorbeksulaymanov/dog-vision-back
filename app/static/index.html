@@ -14,12 +14,12 @@
 html, body { width: 100%; height: 100%; overflow: hidden; background: #0f0f1a; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #fff; }
 #app { position: relative; width: 100%; height: 100%; display: flex; flex-direction: column; }
 
-#viewfinder { position: relative; flex: 1; overflow: hidden; background: #000; display: flex; align-items: center; justify-content: center; }
+#viewfinder { position: relative; flex: 1; overflow: hidden; background: #000; }
 #viewfinder.mirror video, #viewfinder.mirror canvas { transform: scaleX(-1); }
 video, canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; }
 canvas { z-index: 2; pointer-events: none; }
 
-#toolbar { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: rgba(15, 15, 26, 0.95); border-top: 1px solid rgba(255,255,255,0.08); z-index: 10; flex-shrink: 0; min-height: 68px; }
+#toolbar { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: rgba(15, 15, 26, 0.95); border-top: 1px solid rgba(255,255,255,0.08); z-index: 10; flex-shrink: 0; min-height: 64px; }
 
 #startBtn { flex-shrink: 0; width: 48px; height: 48px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.3); background: #e94560; cursor: pointer; transition: background 0.2s, border-color 0.2s; display: flex; align-items: center; justify-content: center; }
 #startBtn.running { background: #0f3460; border-color: rgba(255,255,255,0.5); }
@@ -27,14 +27,14 @@ canvas { z-index: 2; pointer-events: none; }
 #startBtn:not(.running)::after { width: 0; height: 0; border-left: 14px solid #fff; border-top: 9px solid transparent; border-bottom: 9px solid transparent; margin-left: 2px; }
 #startBtn.running::after { width: 14px; height: 14px; background: #fff; border-radius: 2px; }
 
-#status { font-size: 12px; color: #888; min-width: 60px; text-align: center; white-space: nowrap; }
+#status { font-size: 12px; color: #888; min-width: 56px; text-align: center; white-space: nowrap; }
 #status .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
 #status .dot.off { background: #555; }
 #status .dot.on { background: #4ecca3; animation: pulse 1.5s ease-in-out infinite; }
 #status .dot.err { background: #e94560; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
-#fps { font-size: 12px; color: #4ecca3; min-width: 55px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+#fps { font-size: 12px; color: #4ecca3; min-width: 50px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 #resToggle { flex-shrink: 0; padding: 6px 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: transparent; color: #aaa; font-size: 11px; cursor: pointer; }
 #resToggle.active { border-color: #4ecca3; color: #4ecca3; }
@@ -49,7 +49,7 @@ canvas { z-index: 2; pointer-events: none; }
 #errorBanner.show { display: block; }
 
 @media (max-width: 480px) {
-  #toolbar { padding: 8px 10px; gap: 6px; min-height: 58px; }
+  #toolbar { padding: 8px 10px; gap: 6px; min-height: 56px; }
   #startBtn { width: 42px; height: 42px; }
   #status, #fps { font-size: 11px; }
 }
@@ -58,7 +58,7 @@ canvas { z-index: 2; pointer-events: none; }
 <body>
 <div id="app">
   <div id="errorBanner"></div>
-  <div id="viewfinder" class="mirror">
+  <div id="viewfinder">
     <video id="video" playsinline autoplay muted></video>
     <canvas id="canvas"></canvas>
     <div id="overlayMsg" class="visible">Tap the red button to start the camera</div>
@@ -76,7 +76,7 @@ canvas { z-index: 2; pointer-events: none; }
 (function() {
   var video = document.getElementById('video');
   var canvas = document.getElementById('canvas');
-  var ctx = canvas.getContext('2d', { alpha: true });
+  var ctx = canvas.getContext('2d');
   var startBtn = document.getElementById('startBtn');
   var statusEl = document.getElementById('status');
   var fpsEl = document.getElementById('fps');
@@ -92,9 +92,17 @@ canvas { z-index: 2; pointer-events: none; }
   var sendingInFlight = false;
   var currentRes = 480;
   var facingMode = 'environment';
-  var mirror = true;
+  var mirror = false;
 
   var COLORS = ['#e94560','#4ecca3','#ffd369','#6c5ce7','#fd79a8','#00cec9','#fdcb6e','#e17055'];
+
+  // Detection cache for smooth rendering
+  var cachedDetections = [];
+  var cacheTime = 0;
+  var cacheW = 0;
+  var cacheH = 0;
+  var CACHE_TTL = 2000;     // ms — keep showing old detection for 2 sec
+  var FADE_START = 1200;    // ms — start fading after 1.2 sec
 
   function showError(msg) {
     errorBanner.textContent = msg;
@@ -111,34 +119,56 @@ canvas { z-index: 2; pointer-events: none; }
     return proto + '//' + location.host + '/ws/live';
   }
 
-  function drawDetections(data) {
-    var vw = canvas.width;
-    var vh = canvas.height;
-    ctx.clearRect(0, 0, vw, vh);
+  function formatBreed(breed) {
+    if (!breed || breed === 'unknown') return 'Dog';
+    return breed.charAt(0).toUpperCase() + breed.slice(1).replace(/_/g, ' ');
+  }
 
-    var dets = data.detections || [];
-    var fw = data.width || vw;
-    var fh = data.height || vh;
-    var scaleX = vw / fw;
-    var scaleY = vh / fh;
+  // ── Smooth render loop (runs at 60fps via requestAnimationFrame) ──
+  // Decoupled from WebSocket responses — keeps cached detections visible
+  // with a fade-out so the user can actually read the label.
+  function renderLoop() {
+    if (!running) return;
+    requestAnimationFrame(renderLoop);
 
-    for (var i = 0; i < dets.length; i++) {
-      var d = dets[i];
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (!cachedDetections.length || !cacheW) return;
+
+    var now = performance.now();
+    var age = now - cacheTime;
+    if (age > CACHE_TTL) return;
+
+    var opacity = 1.0;
+    if (age > FADE_START) {
+      opacity = Math.max(0, 1.0 - (age - FADE_START) / (CACHE_TTL - FADE_START));
+    }
+
+    // Scale cached detections to current canvas dimensions
+    var scaleX = canvas.width / cacheW;
+    var scaleY = canvas.height / cacheH;
+
+    for (var i = 0; i < cachedDetections.length; i++) {
+      var d = cachedDetections[i];
       var b = d.bbox;
       var x1 = b[0] * scaleX, y1 = b[1] * scaleY;
       var x2 = b[2] * scaleX, y2 = b[3] * scaleY;
       var color = COLORS[i % COLORS.length];
 
+      ctx.globalAlpha = opacity;
+
+      // Bounding box
       ctx.strokeStyle = color;
-      ctx.lineWidth = 2.5;
+      ctx.lineWidth = 3;
       ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
 
-      var label = d.breed ? (d.breed.charAt(0).toUpperCase() + d.breed.slice(1).replace(/_/g, ' ')) : 'Dog';
-      var conf = d.breed_conf && d.breed_conf > 0 ? ' ' + Math.round(d.breed_conf * 100) + '%' : '';
+      // Label
+      var label = formatBreed(d.breed);
+      var conf = (d.breed_conf && d.breed_conf > 0) ? ' ' + Math.round(d.breed_conf * 100) + '%' : '';
       var text = label + conf;
 
       var boxWidth = x2 - x1;
-      var fontSize = Math.max(11, Math.min(15, boxWidth * 0.10));
+      var fontSize = Math.max(12, Math.min(18, boxWidth * 0.08));
       ctx.font = 'bold ' + fontSize + 'px -apple-system, sans-serif';
       ctx.textBaseline = 'top';
       var tw = ctx.measureText(text).width;
@@ -147,20 +177,23 @@ canvas { z-index: 2; pointer-events: none; }
       var ty = y1 - th;
       if (ty < 0) ty = y1;
 
+      // Label background
+      ctx.globalAlpha = opacity * 0.85;
       ctx.fillStyle = color;
-      ctx.fillRect(tx, ty, tw + 8, th);
+      ctx.fillRect(tx, ty, tw + 10, th);
 
+      // Label text
+      ctx.globalAlpha = opacity;
       ctx.fillStyle = '#fff';
-      ctx.fillText(text, tx + 4, ty + 3);
+      ctx.fillText(text, tx + 5, ty + 3);
     }
 
-    fpsEl.textContent = (data.fps || 0).toFixed(1) + ' fps';
+    ctx.globalAlpha = 1.0;
   }
 
+  // ── WebSocket management ──
   function connectWs() {
-    if (ws) {
-      try { ws.close(); } catch(e) {}
-    }
+    if (ws) { try { ws.close(); } catch(e) {} }
     try {
       ws = new WebSocket(buildWsUrl());
     } catch(e) {
@@ -179,13 +212,26 @@ canvas { z-index: 2; pointer-events: none; }
       sendingInFlight = false;
       try {
         var data = JSON.parse(e.data);
-        drawDetections(data);
+
+        // Update FPS display
+        if (data.fps !== undefined) {
+          fpsEl.textContent = data.fps.toFixed(1) + ' fps';
+        }
+
+        // Cache detections for smooth rendering
+        if (data.detections && data.detections.length > 0) {
+          cachedDetections = data.detections;
+          cacheTime = performance.now();
+          cacheW = data.width || canvas.width;
+          cacheH = data.height || canvas.height;
+        }
+        // Don't clear cache on 0-detection frames — let TTL fade handle it
       } catch(err) {
         console.error('Parse error:', err);
       }
+
       if (running && wsConnected) {
-        var delay = 50;
-        setTimeout(sendNextFrame, delay);
+        setTimeout(sendNextFrame, 30);
       }
     };
 
@@ -194,15 +240,14 @@ canvas { z-index: 2; pointer-events: none; }
       sendingInFlight = false;
       if (running) {
         setStatus('err', 'reconnecting');
-        setTimeout(function() {
-          if (running) connectWs();
-        }, 1500);
+        setTimeout(function() { if (running) connectWs(); }, 1500);
       }
     };
 
     ws.onerror = function() {};
   }
 
+  // ── Frame sending (send-after-response for backpressure) ──
   function sendNextFrame() {
     if (!running || !wsConnected || sendingInFlight) return;
     if (ws.readyState !== WebSocket.OPEN) return;
@@ -210,8 +255,8 @@ canvas { z-index: 2; pointer-events: none; }
 
     var vw = video.videoWidth;
     var vh = video.videoHeight;
-
     var maxDim = currentRes;
+
     var sw, sh;
     if (vw > vh) {
       sw = Math.min(vw, maxDim);
@@ -224,14 +269,16 @@ canvas { z-index: 2; pointer-events: none; }
     var offCanvas = document.createElement('canvas');
     offCanvas.width = sw;
     offCanvas.height = sh;
-    var offCtx = offCanvas.getContext('2d');
-    offCtx.drawImage(video, 0, 0, sw, sh);
+    offCanvas.getContext('2d').drawImage(video, 0, 0, sw, sh);
 
-    canvas.width = sw;
-    canvas.height = sh;
+    // Set canvas dimensions to match sent frame (for correct bbox scaling)
+    if (canvas.width !== sw || canvas.height !== sh) {
+      canvas.width = sw;
+      canvas.height = sh;
+    }
 
     offCanvas.toBlob(function(blob) {
-      if (!blob || !running || !wsConnected) return;
+      if (!blob || !running || !wsConnected || sendingInFlight) return;
       blob.arrayBuffer().then(function(buf) {
         if (ws && ws.readyState === WebSocket.OPEN && running && !sendingInFlight) {
           sendingInFlight = true;
@@ -241,6 +288,7 @@ canvas { z-index: 2; pointer-events: none; }
     }, 'image/jpeg', 0.75);
   }
 
+  // ── Resolution toggle ──
   resToggle.addEventListener('click', function() {
     var next = currentRes === 480 ? 360 : currentRes === 360 ? 240 : 480;
     currentRes = next;
@@ -248,37 +296,39 @@ canvas { z-index: 2; pointer-events: none; }
     resToggle.classList.toggle('active', currentRes !== 480);
   });
 
+  // ── Camera flip (front/back) ──
+  function setMirror(m) {
+    mirror = m;
+    viewfinder.classList.toggle('mirror', m);
+    flipBtn.classList.toggle('active', m);
+  }
+
   flipBtn.addEventListener('click', function() {
     facingMode = facingMode === 'environment' ? 'user' : 'environment';
-    mirror = facingMode === 'user';
-    viewfinder.classList.toggle('mirror', mirror);
-    flipBtn.classList.toggle('active', facingMode === 'user');
-    if (running) {
-      restartCamera();
-    }
+    setMirror(facingMode === 'user');
+    if (running) restartCamera();
   });
 
+  // ── Camera start/stop ──
   function startCamera() {
     overlayMsg.classList.remove('visible');
-    var maxDim = currentRes;
+    setMirror(facingMode === 'user');
+
     navigator.mediaDevices.getUserMedia({
-      video: {
-        width: { ideal: maxDim },
-        height: { ideal: maxDim },
-        facingMode: facingMode
-      },
+      video: { width: { ideal: currentRes }, height: { ideal: currentRes }, facingMode: facingMode },
       audio: false
     })
       .then(function(stream) {
         video.srcObject = stream;
         video.onloadedmetadata = function() {
           video.play();
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
           running = true;
           startBtn.classList.add('running');
-          connectingWs = true;
+          setStatus('on', 'connecting');
+          cachedDetections = [];
+          cacheTime = 0;
           connectWs();
+          requestAnimationFrame(renderLoop);
         };
       })
       .catch(function(err) {
@@ -289,22 +339,18 @@ canvas { z-index: 2; pointer-events: none; }
       });
   }
 
-  var connectingWs = false;
-
   function stopCamera() {
     running = false;
     wsConnected = false;
     sendingInFlight = false;
     startBtn.classList.remove('running');
-    if (ws) {
-      try { ws.close(); } catch(e) {}
-      ws = null;
-    }
+    if (ws) { try { ws.close(); } catch(e) {} ws = null; }
     if (video.srcObject) {
       video.srcObject.getTracks().forEach(function(t) { t.stop(); });
       video.srcObject = null;
     }
     ctx.clearRect(0, 0, canvas.width || 1, canvas.height || 1);
+    cachedDetections = [];
     fpsEl.textContent = '-- fps';
     setStatus('off', 'idle');
     overlayMsg.classList.add('visible');
@@ -312,13 +358,10 @@ canvas { z-index: 2; pointer-events: none; }
   }
 
   function restartCamera() {
-    var oldRunning = running;
-    if (running) {
-      if (ws) { try { ws.close(); } catch(e) {} ws = null; wsConnected = false; sendingInFlight = false; }
-      if (video.srcObject) {
-        video.srcObject.getTracks().forEach(function(t) { t.stop(); });
-        video.srcObject = null;
-      }
+    if (ws) { try { ws.close(); } catch(e) {} ws = null; wsConnected = false; sendingInFlight = false; }
+    if (video.srcObject) {
+      video.srcObject.getTracks().forEach(function(t) { t.stop(); });
+      video.srcObject = null;
     }
     navigator.mediaDevices.getUserMedia({
       video: { width: { ideal: currentRes }, height: { ideal: currentRes }, facingMode: facingMode },
@@ -328,9 +371,7 @@ canvas { z-index: 2; pointer-events: none; }
         video.srcObject = stream;
         video.onloadedmetadata = function() {
           video.play();
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
-          if (oldRunning) connectWs();
+          if (running) connectWs();
         };
       })
       .catch(function(err) {
@@ -340,7 +381,7 @@ canvas { z-index: 2; pointer-events: none; }
   }
 
   startBtn.addEventListener('click', function() {
-    if (running) { stopCamera(); } else { startCamera(); }
+    if (running) stopCamera(); else startCamera();
   });
 
   window.addEventListener('beforeunload', function() { stopCamera(); });
