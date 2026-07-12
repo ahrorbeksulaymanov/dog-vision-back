@@ -1,4 +1,5 @@
 import time
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from typing import Optional
 
@@ -8,10 +9,22 @@ from PIL import Image
 from app.detector import detector
 from app.predictor import predictor
 
+_MAX_WORKERS = 4
+
 
 class LivePipeline:
-    def __init__(self):
+    def __init__(self, max_workers: int = _MAX_WORKERS):
         self.prev_time: Optional[float] = None
+        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+
+    def _classify_crop(self, crop: Image.Image):
+        buf = BytesIO()
+        crop.save(buf, format="JPEG", quality=85)
+        crop_bytes = buf.getvalue()
+        try:
+            return predictor.predict(crop_bytes, use_tta=False)
+        except Exception:
+            return None
 
     def process_frame(self, jpeg_bytes: bytes):
         image = Image.open(BytesIO(jpeg_bytes)).convert("RGB")
@@ -20,30 +33,32 @@ class LivePipeline:
 
         dog_detections = detector.detect(frame)
 
-        results = []
+        crops = []
+        validated_boxes = []
         for det in dog_detections:
             x1, y1, x2, y2 = det["bbox"]
             x1 = max(0, x1)
             y1 = max(0, y1)
             x2 = min(w, x2)
             y2 = min(h, y2)
-
+            if x2 <= x1 or y2 <= y1:
+                continue
             crop = image.crop((x1, y1, x2, y2))
+            crops.append(crop)
+            validated_boxes.append((det, x1, y1, x2, y2))
 
-            buf = BytesIO()
-            crop.save(buf, format="JPEG", quality=85)
-            crop_bytes = buf.getvalue()
+        if crops:
+            preds = list(self._executor.map(self._classify_crop, crops))
+        else:
+            preds = []
 
-            try:
-                pred = predictor.predict(crop_bytes, use_tta=False)
-            except Exception:
-                pred = None
-
+        results = []
+        for i, (det, x1, y1, x2, y2) in enumerate(validated_boxes):
+            pred = preds[i]
             result = {
                 "bbox": [x1, y1, x2, y2],
                 "det_conf": round(det["confidence"], 4),
             }
-
             if pred and not pred["is_unknown"]:
                 result["breed"] = pred["primary"]["breed"]
                 result["breed_conf"] = pred["primary"]["confidence"]
@@ -51,7 +66,6 @@ class LivePipeline:
             else:
                 result["breed"] = "unknown"
                 result["breed_conf"] = 0.0
-
             results.append(result)
 
         now = time.time()

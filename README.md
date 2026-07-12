@@ -85,13 +85,49 @@ uvicorn app.main:app --reload
 
 Open `http://127.0.0.1:8000` on your phone or desktop. Allow camera access.
 
-## Deploy to Hugging Face Spaces (Free)
+## Deploy to Hugging Face Spaces
 
-### 1. Create a Space
+**Cost: ~$0.03/hour** (8 vCPU, 32GB RAM) with 15-min auto-sleep. At ~1 hour/day usage = **~$1/month**.
 
-Go to [huggingface.co/new-space](https://huggingface.co/new-space) and create a **Docker** space (choose "Docker" as the SDK, "Blank" template). Add this metadata to the top of the Space's `README.md`:
+### Quick Deploy (automated)
 
-```yaml
+```bash
+# From the project root:
+./deploy_hfspaces.sh
+```
+
+This script clones your HF Space, copies all files, sets up Git LFS, and pushes.
+
+### Manual Deploy
+
+#### 1. Create a Space
+
+Go to [huggingface.co/new-space](https://huggingface.co/new-space):
+- **Space name**: `dog-vision`
+- **SDK**: Docker (Blank)
+- **Hardware**: 8 vCPU / 32GB RAM (upgrade from free tier after creating)
+- **Sleep settings**: 15 min inactivity timeout
+
+#### 2. Push your code
+
+```bash
+git clone https://huggingface.co/spaces/mozzamshahid/dog-vision
+cd dog-vision
+
+# Copy all project files
+cp -r /path/to/dog-vision-back/app .
+cp -r /path/to/dog-vision-back/models .
+cp -r /path/to/dog-vision-back/data .
+cp /path/to/dog-vision-back/{Dockerfile,.dockerignore,requirements.txt} .
+
+# Track model weights with Git LFS (they're too big for regular git)
+git lfs install
+git lfs track "*.keras"
+git add .gitattributes
+git add -A
+
+# Create HF metadata README
+cat > README.md << 'EOF'
 ---
 title: Dog Vision
 emoji: 🐕
@@ -101,40 +137,38 @@ sdk: docker
 app_port: 7860
 pinned: false
 ---
-```
+Dog Vision — Live dog breed detection from your phone camera.
+EOF
 
-### 2. Push your code
-
-```bash
-# Clone the space repo
-git clone https://huggingface.co/spaces/YOUR_USERNAME/dog-vision
-cd dog-vision
-
-# Copy all project files (including models/)
-cp -r /path/to/dog-vision-back/* .
-
-# Models are gitignored — add them with Git LFS (HF Spaces supports this)
-git lfs install
-git lfs track "*.keras"
-git add .gitattributes
-git add models/*.keras models/*.json data/*.json app/ Dockerfile .dockerignore Dockerfile requirements.txt
-
-# Commit and push
 git commit -m "Deploy Dog Vision to HF Spaces"
 git push
 ```
 
-### 3. Wait for build
+#### 3. Set the hardware
 
-HF Spaces will build the Docker image (first build takes ~10-15 minutes — TensorFlow is large). The detector model (EfficientDet-Lite0, ~6MB) is cached during the build.
+After the Space is created, go to **Settings → Hardware** and select **8 vCPU / 32GB RAM**.
 
-### 4. Open on your phone
+#### 4. Wait for build (~10-15 min)
 
-Visit `https://YOUR_USERNAME-dog-vision.hf.space` in your phone browser. Allow camera and tap the red button.
+The first Docker build is slow because TensorFlow is large (~500MB pip package). The EfficientDet-Lite0 detector (~6MB) downloads during the build and is cached.
 
-### Configuration
+#### 5. Open on your phone
 
-The space needs at least **2GB RAM** (TensorFlow + models). Free HF Spaces provide 16GB RAM by default — no changes needed.
+Visit `https://mozZamshahid-dog-vision.hf.space` on your phone:
+1. Allow camera access
+2. Tap the **red button** to start
+3. Point at a dog — colored bounding boxes with breed names appear in real time
+
+### Cost Breakdown
+
+| Setting | Value |
+|---------|-------|
+| Hardware | 8 vCPU + 32GB RAM |
+| Price | $0.03/hour |
+| Auto-sleep | After 15 min inactivity |
+| Cold start | ~30-60 sec (models load into memory) |
+| Usage: 1 hr/day | ~$0.90/month |
+| Usage: 2 hr/day | ~$1.80/month |
 
 ## Single Image Prediction (API)
 

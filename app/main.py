@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, UploadFile, Query, WebSocket
@@ -58,16 +59,18 @@ async def predict(
     tta: bool = Query(False, description="Enable test-time augmentation"),
 ):
     image_bytes = await file.read()
-    return predictor.predict(image_bytes, use_tta=tta)
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, predictor.predict, image_bytes, tta)
 
 
 @app.websocket("/ws/live")
 async def websocket_live(ws: WebSocket):
     await ws.accept()
+    loop = asyncio.get_event_loop()
     try:
         while True:
             data = await ws.receive_bytes()
-            result = pipeline.process_frame(data)
+            result = await loop.run_in_executor(None, pipeline.process_frame, data)
             await ws.send_json(result)
     except Exception:
         pass
